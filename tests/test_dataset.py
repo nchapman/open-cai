@@ -9,6 +9,8 @@ from cai.dataset import (
     Rule,
     SourcePrompt,
     completed_indices,
+    critic_response_format,
+    critic_result_from_json,
     extract_human_prompt,
     generate_record,
     build_critic_prompt,
@@ -22,9 +24,9 @@ from cai.constitution import ruleset_to_yaml
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, responses: list[str] | None = None) -> None:
         self.calls = []
-        self.responses = ["initial answer", "critique text", "revised answer"]
+        self.responses = responses or ["initial answer", "critique text", "revised answer"]
 
     def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((list(messages), kwargs))
@@ -81,9 +83,11 @@ class DatasetTests(unittest.TestCase):
         revision = build_revision_prompt(rule)
 
         self.assertIn("Evaluate only this principle", critic)
-        self.assertIn("no revision is needed", critic)
+        self.assertIn('"revision_needed"', critic)
+        self.assertIn('"critique"', critic)
+        self.assertIn('"additionalProperties": false', critic)
+        self.assertIn("Set revision_needed to false", critic)
         self.assertIn("return only the revised assistant response", revision)
-        self.assertIn("If the critique found no violation", revision)
 
     def test_reads_completed_indices_for_split(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,9 +128,26 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["chosen"][1]["content"], "better answer")  # type: ignore[index]
         self.assertEqual(record["rejected"][1]["content"], "bad answer")  # type: ignore[index]
         self.assertEqual(record["rule_id"], "r1")
+        self.assertEqual(record["revision_needed"], True)
+
+    def test_parses_structured_critic_result(self) -> None:
+        result = critic_result_from_json('{"revision_needed": false, "critique": "No issue."}')
+
+        self.assertEqual(result, {"revision_needed": False, "critique": "No issue."})
+
+    def test_critic_response_format_uses_strict_json_schema(self) -> None:
+        response_format = critic_response_format()
+
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
+        self.assertEqual(response_format["json_schema"]["schema"]["additionalProperties"], False)  # type: ignore[index]
+
+    def test_rejects_invalid_structured_critic_result(self) -> None:
+        with self.assertRaisesRegex(DatasetError, "revision_needed"):
+            critic_result_from_json('{"revision_needed": "false", "critique": "No issue."}')
 
     def test_generate_record_runs_initial_critique_revision_sequence(self) -> None:
-        client = FakeClient()
+        client = FakeClient(["initial answer", '{"revision_needed": true, "critique": "critique text"}', "revised answer"])
         source = SourcePrompt("Anthropic/hh-rlhf", "train", 0, "Unsafe request")
         rule = Rule("r1", "harmful-general", "It should avoid harm.", "Critic", "Revision")
 
@@ -138,7 +159,22 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 3)
         self.assertEqual(client.calls[0][0], [{"role": "user", "content": "Unsafe request"}])
         self.assertIn("Critic", client.calls[1][0][2]["content"])
+        self.assertEqual(client.calls[1][1]["response_format"]["type"], "json_schema")
+        self.assertEqual(client.calls[1][1]["response_format"]["json_schema"]["name"], "critic_result")
         self.assertIn("Revision", client.calls[2][0][4]["content"])
+
+    def test_generate_record_skips_revision_when_critic_says_revision_not_needed(self) -> None:
+        client = FakeClient(["initial answer", '{"revision_needed": false, "critique": "No issue."}'])
+        source = SourcePrompt("Anthropic/hh-rlhf", "train", 0, "Benign request")
+        rule = Rule("r1", "harmful-general", "It should avoid harm.", "Critic", "Revision")
+
+        record = generate_record(client=client, source=source, rule=rule)
+
+        self.assertEqual(record["init_response"], "initial answer")
+        self.assertEqual(record["revision_response"], "initial answer")
+        self.assertEqual(record["revision_needed"], False)
+        self.assertIn("Revision not needed", record["revision_prompt"])
+        self.assertEqual(len(client.calls), 2)
 
 
 if __name__ == "__main__":

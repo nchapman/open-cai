@@ -28,6 +28,21 @@ DEFAULT_MAX_TOKENS = 1500
 DEFAULT_TEMPERATURE = 1.0
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
+CRITIC_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "revision_needed": {
+            "type": "boolean",
+            "description": "Whether the assistant response violates the sampled rule and should be rewritten.",
+        },
+        "critique": {
+            "type": "string",
+            "description": "A concise critique explaining the decision, with concrete offending content when revision is needed.",
+        },
+    },
+    "required": ["revision_needed", "critique"],
+    "additionalProperties": False,
+}
 
 
 class DatasetError(RuntimeError):
@@ -140,10 +155,15 @@ def load_source_prompts(
 
 
 def build_critic_prompt(rule: Rule) -> str:
+    schema = json.dumps(CRITIC_RESPONSE_SCHEMA, sort_keys=True)
     return (
         f"{rule.critic}\n\n"
         f"Principle: {rule.principle}\n\n"
-        "Evaluate only this principle. If the assistant response does not violate it, say that no revision is needed and explain briefly."
+        "Evaluate only this principle. Return only JSON matching this schema:\n"
+        f"{schema}\n\n"
+        "Set revision_needed to true only when the assistant response violates this principle and should be rewritten. "
+        "Set revision_needed to false when the response already satisfies this principle or the principle is not applicable. "
+        "The critique must briefly explain the decision and identify concrete offending content when revision is needed."
     )
 
 
@@ -153,8 +173,7 @@ def build_revision_prompt(rule: Rule) -> str:
         f"Principle: {rule.principle}\n\n"
         "Rewrite the assistant's original response as the final answer to the human. "
         "Use the critique above, but return only the revised assistant response. "
-        "Do not explain that you are revising, do not mention the critique, and do not refer to the previous response. "
-        "If the critique found no violation, preserve the original answer with only minor clarity or style improvements."
+        "Do not explain that you are revising, do not mention the critique, and do not refer to the previous response."
     )
 
 
@@ -166,6 +185,50 @@ def trim_stop_sequences(text: str, stop_sequences: Iterable[str] = STOP_SEQUENCE
     return stripped
 
 
+def critic_result_from_json(text: str) -> dict[str, object]:
+    """Parse and validate the critic's structured JSON response."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DatasetError(f"critic returned invalid JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise DatasetError("critic JSON must be an object")
+
+    keys = set(payload)
+    expected = {"revision_needed", "critique"}
+    missing = expected - keys
+    extra = keys - expected
+    if missing:
+        raise DatasetError(f"critic JSON missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise DatasetError(f"critic JSON unexpected fields: {', '.join(sorted(extra))}")
+
+    revision_needed = payload["revision_needed"]
+    if not isinstance(revision_needed, bool):
+        raise DatasetError("critic JSON field revision_needed must be a boolean")
+
+    critique = payload["critique"]
+    if not isinstance(critique, str) or not critique.strip():
+        raise DatasetError("critic JSON field critique must be a non-empty string")
+
+    return {"revision_needed": revision_needed, "critique": critique.strip()}
+
+
+def critic_response_format() -> dict[str, object]:
+    """Return OpenRouter's strict JSON Schema response format for critic calls."""
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "critic_result",
+            "strict": True,
+            "schema": CRITIC_RESPONSE_SCHEMA,
+        },
+    }
+
+
 def make_record(
     *,
     source: SourcePrompt,
@@ -175,6 +238,7 @@ def make_record(
     critic_response: str,
     revision_prompt: str,
     revision_response: str,
+    revision_needed: bool = True,
 ) -> dict[str, object]:
     """Create the JSONL row, including later SFT/preference-friendly fields."""
 
@@ -203,6 +267,7 @@ def make_record(
         "critic_response": critic_response.strip(),
         "revision_prompt": revision_prompt.strip(),
         "revision_response": revised,
+        "revision_needed": revision_needed,
         "prompt": init_prompt,
         "messages": chosen,
         "chosen": chosen,
@@ -237,14 +302,30 @@ def generate_record(
     messages.append({"role": "assistant", "content": init_response})
     messages.append({"role": "user", "content": critic_prompt})
 
-    critic_response = _chat_with_retries(
+    critic_raw_response = _chat_with_retries(
         client,
         messages,
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
+        response_format=critic_response_format(),
     )
+    critic_result = critic_result_from_json(critic_raw_response)
+    critic_response = str(critic_result["critique"])
+    revision_needed = bool(critic_result["revision_needed"])
+    if not revision_needed:
+        return make_record(
+            source=source,
+            rule=rule,
+            init_response=init_response,
+            critic_prompt=critic_prompt,
+            critic_response=critic_response,
+            revision_prompt="Revision not needed: the critic found no violation of the sampled rule.",
+            revision_response=init_response,
+            revision_needed=False,
+        )
+
     messages.append({"role": "assistant", "content": critic_response})
     messages.append({"role": "user", "content": revision_prompt})
 
@@ -265,6 +346,7 @@ def generate_record(
         critic_response=critic_response,
         revision_prompt=revision_prompt,
         revision_response=revision_response,
+        revision_needed=True,
     )
 
 
@@ -276,6 +358,7 @@ def _chat_with_retries(
     temperature: float,
     max_tokens: int,
     retries: int,
+    response_format: Mapping[str, object] | None = None,
 ) -> str:
     for attempt in range(retries + 1):
         try:
@@ -285,6 +368,7 @@ def _chat_with_retries(
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    response_format=response_format,
                 )
             )
         except OpenRouterError:
