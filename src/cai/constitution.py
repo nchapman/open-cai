@@ -17,7 +17,7 @@ from cai.openrouter import OpenRouterClient, OpenRouterError, settings_from_env
 RULE_FIELDS = ("id", "category", "principle", "critic", "revision")
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v6-source-faithful-balanced-posture"
+COMPILER_PROMPT_VERSION = "v7-objective-applicability-minimal-revision"
 
 CATEGORY_DESCRIPTIONS = (
     ("age-appropriate", "children, minors, dependent people, vulnerable people, abuse or exploitation risk, and age-appropriate handling"),
@@ -67,7 +67,7 @@ def compile_markdown(
     *,
     model: str | None = None,
     temperature: float = 0.0,
-    max_tokens: int = 4000,
+    max_tokens: int = 12000,
 ) -> list[dict[str, str]]:
     """Compile a complete Markdown constitution through an OpenRouter model."""
 
@@ -195,6 +195,7 @@ Rules:
 - Extract the author's intended principles from the entire Markdown document.
 - Preserve meaning; do not invent unrelated principles.
 - Treat the source Markdown as authoritative. Do not assume the constitution is strict, balanced, permissive, safety-focused, humor-focused, or helpfulness-focused unless the source says so.
+- Identify the source constitution's top-level objective first. Every rule must serve that objective. Do not produce a longer or broader rule list if that weakens the objective.
 - Use one rule per distinct principle.
 - Use stable lower-kebab-case ids.
 - Use these categories when possible:
@@ -208,12 +209,14 @@ Crispness requirements:
 - Keep each rule narrow enough to produce a meaningfully different critique/revision from the other rules.
 - If one source bullet contains multiple independent obligations, split it into multiple rules. If the obligations share one behavioral test, keep them together.
 - The principle should be a short, plain-language statement of the rule. Prefer one sentence.
-- The critic must be an observable test for the assistant response. It should say what concrete behavior to inspect for and should ask the critic to point out the offending content or missing behavior.
-- The revision must say what to remove, what to preserve, and what safe alternative, redirect, correction, or next step to provide when relevant.
+- The critic must be an observable test for the assistant response. It must state when the rule applies, when it does not apply, what concrete behavior counts as a violation, and what offending content or missing behavior to identify.
+- The critic must make it easy for a later model to return revision_needed=false when the rule is irrelevant or already satisfied. Do not write critic prompts that imply every response needs a revision.
+- The revision must be minimal and targeted. It must say what to remove, what to preserve, and what safe alternative, redirect, correction, or next step to provide when relevant.
+- The revision must preserve the original answer unless specific content violates the rule. Do not add unrelated safety warnings, crisis language, privacy language, moral framing, or tone changes.
 - Avoid mushy wording such as "be appropriate", "use care", "ensure safety", or "follow the principle" unless paired with concrete criteria.
 - Use concrete verbs such as identify, remove, replace, preserve, redirect, correct, refuse, answer, recommend, or ask.
 - Preserve requested style from the source, such as humor or light wit, only when it does not undermine safety or dignity.
-- Preserve the source constitution's risk posture. Strict constitutions should flag ambiguity, borderline enablement, and missing safeguards. Balanced constitutions should balance useful answers with safety limits. Permissive constitutions should flag over-refusal and preserve as much benign, educational, fictional, analytical, or defensive detail as possible while still removing actionable harm.
+- Preserve the source constitution's risk posture. Strict constitutions should refuse explicit harmful requests directly, clarify only genuinely ambiguous risky requests, and flag borderline enablement or missing safeguards. Balanced constitutions should balance useful answers with safety limits. Permissive constitutions should flag over-refusal and preserve as much benign, educational, fictional, analytical, or defensive detail as possible while still removing actionable harm. Playful constitutions should apply humor only when the relevant harmful, criminal, or socially inappropriate framing is actually present.
 - Do not flatten strict, balanced, and permissive constitutions into the same generic safety behavior.
 - If the source is not a safety constitution, do not transform it into one. Produce rules that faithfully express the source's actual goals.
 - Do not add broad generic safety rules that are not grounded in the source Markdown.
@@ -327,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--env", type=Path, default=Path(".env"))
     compile_parser.add_argument("--model")
     compile_parser.add_argument("--temperature", type=float, default=0.0)
-    compile_parser.add_argument("--max-tokens", type=int, default=4000)
+    compile_parser.add_argument("--max-tokens", type=int, default=12000)
     compile_parser.set_defaults(func=_cmd_compile)
 
     return parser

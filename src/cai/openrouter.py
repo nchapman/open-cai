@@ -14,7 +14,7 @@ from typing import Mapping, Sequence
 
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "mistralai/mistral-7b-instruct"
+DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 
 
 Message = Mapping[str, str]

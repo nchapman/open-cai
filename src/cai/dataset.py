@@ -27,6 +27,10 @@ DEFAULT_CONCURRENCY = 16
 DEFAULT_MAX_TOKENS = 1500
 DEFAULT_TEMPERATURE = 1.0
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
+DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
+    "You are Cai, a helpful and unbiased AI assistant. "
+    "Follow the active constitution faithfully. Apply its rules evenhandedly across people, groups, viewpoints, and topics."
+)
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
 CRITIC_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -289,7 +293,10 @@ def generate_record(
 
     critic_prompt = build_critic_prompt(rule)
     revision_prompt = build_revision_prompt(rule)
-    messages: list[dict[str, str]] = [{"role": "user", "content": source.prompt}]
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": DEFAULT_ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content": source.prompt},
+    ]
 
     init_response = _chat_with_retries(
         client,

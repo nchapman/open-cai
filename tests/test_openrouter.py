@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from cai.openrouter import OpenRouterError, settings_from_env
+from cai.openrouter import DEFAULT_MODEL, OpenRouterError, settings_from_env
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class OpenRouterTests(unittest.TestCase):
                 "\n".join(
                     [
                         "OPENROUTER_API_KEY=test-key",
-                        "OPENROUTER_MODEL=mistralai/mistral-7b-instruct",
+                        "OPENROUTER_MODEL=deepseek/deepseek-v4-pro",
                         "APP_TITLE=cai-test",
                     ]
                 ),
@@ -31,8 +31,11 @@ class OpenRouterTests(unittest.TestCase):
                         os.environ[key] = old_values[key] or ""
 
             self.assertEqual(settings.api_key, "test-key")
-            self.assertEqual(settings.model, "mistralai/mistral-7b-instruct")
+            self.assertEqual(settings.model, "deepseek/deepseek-v4-pro")
             self.assertEqual(settings.app_title, "cai-test")
+
+    def test_default_model_is_content_generation_model(self) -> None:
+        self.assertEqual(DEFAULT_MODEL, "deepseek/deepseek-v4-pro")
 
     def test_requires_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

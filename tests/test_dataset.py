@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from cai.dataset import (
+    DEFAULT_ASSISTANT_SYSTEM_PROMPT,
     DatasetError,
     Rule,
     SourcePrompt,
@@ -157,11 +158,17 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["critic_response"], "critique text")
         self.assertEqual(record["revision_response"], "revised answer")
         self.assertEqual(len(client.calls), 3)
-        self.assertEqual(client.calls[0][0], [{"role": "user", "content": "Unsafe request"}])
-        self.assertIn("Critic", client.calls[1][0][2]["content"])
+        self.assertEqual(
+            client.calls[0][0],
+            [
+                {"role": "system", "content": DEFAULT_ASSISTANT_SYSTEM_PROMPT},
+                {"role": "user", "content": "Unsafe request"},
+            ],
+        )
+        self.assertIn("Critic", client.calls[1][0][3]["content"])
         self.assertEqual(client.calls[1][1]["response_format"]["type"], "json_schema")
         self.assertEqual(client.calls[1][1]["response_format"]["json_schema"]["name"], "critic_result")
-        self.assertIn("Revision", client.calls[2][0][4]["content"])
+        self.assertIn("Revision", client.calls[2][0][5]["content"])
 
     def test_generate_record_skips_revision_when_critic_says_revision_not_needed(self) -> None:
         client = FakeClient(["initial answer", '{"revision_needed": false, "critique": "No issue."}'])
