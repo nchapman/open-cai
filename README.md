@@ -61,6 +61,24 @@ Try a one-off request with:
 uv run cai-openrouter chat "Say this is a test"
 ```
 
+## Dataset generation
+
+Generate CAI-style critique/revision rows from Anthropic HH-RLHF harmless-base
+with a reviewed YAML ruleset:
+
+```bash
+uv run cai-dataset generate \
+  --rules constitutions/compiled/balanced.rules.yaml \
+  --output data/generated/balanced.jsonl \
+  --max-samples 128 \
+  --concurrency 16
+```
+
+Use `--max-samples -1` for the full split. The output is JSONL and includes the
+initial response, sampled rule, critique, revision, and `chosen`/`rejected`
+message pairs for later training steps. Re-running the same command resumes by
+skipping source indices already present in the output file.
+
 Run tests with:
 
 ```bash

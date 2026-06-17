@@ -5,11 +5,13 @@ description = "A small Constitutional AI pipeline playground."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=3.0.0",
     "pyyaml>=6.0.2",
 ]
 
 [project.scripts]
 cai-constitution = "cai.constitution:main"
+cai-dataset = "cai.dataset:main"
 cai-openrouter = "cai.openrouter:main"
 
 [build-system]
