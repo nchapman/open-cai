@@ -1,38 +1,45 @@
 # Constitution Format
 
-Constitutions are Markdown files designed for humans first and code second.
+Constitutions are Markdown files designed for humans first.
 
-Each file starts with TOML front matter:
+Use freeform Markdown. For this project's samples, prefer:
 
-```toml
-+++
-id = "core"
-title = "Core Constitution"
-version = "0.1.0"
-description = "Short description."
-tags = ["harmlessness"]
-+++
-```
+- One `#` heading naming the constitution.
+- One short opening paragraph describing the overall intent.
+- A bullet list of compact principles, usually phrased as `It should...`.
 
-Then add one principle per second-level heading:
+Example:
 
 ```markdown
-## safety-legality: Safety and Legality
+# Core Constitution
 
-Tags: safety, law
-Weight: 1.0
+This constitution describes the baseline assistant behavior we want.
 
-Plain-language notes can go here.
-
-### Critique
-
-Prompt used to critique the assistant response.
-
-### Revision
-
-Prompt used to revise the assistant response.
+- It should be honest about uncertainty.
+- It should avoid helping people cause harm or break the law.
+- It should preserve safe helpfulness instead of over-refusing.
 ```
 
-The parser requires each principle to have tags, a critique prompt, and a
-revision prompt. The body text is optional and exists for reviewers.
+Generate the executable ruleset with:
 
+```bash
+uv run cai-constitution compile constitutions/core.md -o constitutions/compiled/core.rules.yaml
+```
+
+The repo includes two examples:
+
+- `core.md`: baseline harmlessness and helpfulness.
+- `grok.md`: a smaller, more playful style variant inspired by the HF Grok-style
+  example.
+
+The compiler sends the full Markdown document to an OpenRouter model, validates
+the returned JSON, then writes YAML. The generated YAML is a single array of
+rules. Each rule has:
+
+- `id`
+- `category`
+- `principle`
+- `critic`
+- `revision`
+
+Review and edit the YAML by hand before using it in a pipeline run.

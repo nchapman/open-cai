@@ -1,188 +1,243 @@
-"""Load and validate human-readable constitution files."""
+"""Compile freeform constitution Markdown into editable ruleset YAML."""
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
+import json
 import re
 import sys
-import tomllib
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
+
+import yaml
+
+from cai.openrouter import OpenRouterClient, OpenRouterError, settings_from_env
 
 
-FRONT_MATTER = "+++"
-PRINCIPLE_HEADING = re.compile(r"^##\s+(?P<id>[a-z0-9][a-z0-9-]*):\s+(?P<title>.+?)\s*$")
-SUBHEADING = re.compile(r"^###\s+(?P<title>.+?)\s*$")
+RULE_FIELDS = ("id", "category", "principle", "critic", "revision")
+RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
 
-
-@dataclasses.dataclass(frozen=True)
-class Principle:
-    """One critique/revision rule from a constitution."""
-
-    id: str
-    title: str
-    tags: tuple[str, ...]
-    weight: float
-    body: str
-    critique: str
-    revision: str
-
-
-@dataclasses.dataclass(frozen=True)
-class Constitution:
-    """A parsed constitution document."""
-
-    id: str
-    title: str
-    version: str
-    description: str
-    tags: tuple[str, ...]
-    principles: tuple[Principle, ...]
+KNOWN_CATEGORIES = (
+    "age-appropriate",
+    "social-bias",
+    "criminal-activity",
+    "harmful-general",
+    "baiting",
+    "dangerous-advice",
+    "empathy-support",
+    "gender-bias",
+    "harmful-assumptions",
+    "moral-standards",
+    "privacy-consent",
+    "deception-manipulation",
+    "high-impact-advice",
+    "preserve-helpfulness",
+)
 
 
 class ConstitutionError(ValueError):
-    """Raised when a constitution file cannot be parsed or validated."""
+    """Raised when a constitution or ruleset cannot be compiled or validated."""
 
 
-def load_constitution(path: str | Path) -> Constitution:
-    """Load a constitution Markdown file."""
+class LiteralString(str):
+    """String that should be emitted as a YAML literal block."""
 
-    source = Path(path).read_text(encoding="utf-8")
-    metadata, content = _split_front_matter(source)
-    principles = tuple(_parse_principles(content))
 
-    required = ("id", "title", "version", "description")
-    missing = [key for key in required if not str(metadata.get(key, "")).strip()]
-    if missing:
-        raise ConstitutionError(f"missing front matter fields: {', '.join(missing)}")
+class RulesetDumper(yaml.SafeDumper):
+    """YAML dumper with indentation tuned for hand-edited files."""
 
-    if not principles:
-        raise ConstitutionError("constitution must define at least one principle")
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+        return super().increase_indent(flow, False)
 
-    _ensure_unique("principle id", (principle.id for principle in principles))
 
-    return Constitution(
-        id=str(metadata["id"]),
-        title=str(metadata["title"]),
-        version=str(metadata["version"]),
-        description=str(metadata["description"]),
-        tags=tuple(str(tag) for tag in metadata.get("tags", ())),
-        principles=principles,
+def _literal_string_representer(dumper: yaml.SafeDumper, value: LiteralString) -> yaml.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|")
+
+
+RulesetDumper.add_representer(LiteralString, _literal_string_representer)
+
+
+def compile_markdown(
+    markdown: str,
+    client: OpenRouterClient,
+    *,
+    model: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 4000,
+) -> list[dict[str, str]]:
+    """Compile a complete Markdown constitution through an OpenRouter model."""
+
+    if not markdown.strip():
+        raise ConstitutionError("constitution Markdown is empty")
+
+    response = client.chat(
+        _compiler_messages(markdown),
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
+    return ruleset_from_json(response)
+
+
+def ruleset_from_json(text: str) -> list[dict[str, str]]:
+    """Parse and validate compiler JSON output."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ConstitutionError(f"compiler returned invalid JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ConstitutionError("compiler JSON must be an object")
+
+    raw_rules = payload.get("rules")
+    if not isinstance(raw_rules, list):
+        raise ConstitutionError("compiler JSON must contain a rules array")
+
+    rules: list[dict[str, str]] = []
+    for index, raw_rule in enumerate(raw_rules, start=1):
+        rules.append(_validate_rule(raw_rule, index))
+
+    if not rules:
+        raise ConstitutionError("rules array must not be empty")
+
+    _ensure_unique("rule id", (rule["id"] for rule in rules))
+    return rules
+
+
+def ruleset_to_yaml(rules: list[dict[str, str]]) -> str:
+    """Serialize rules as reviewer-friendly YAML."""
+
+    yaml_rules = [
+        {
+            "id": rule["id"],
+            "category": rule["category"],
+            "principle": rule["principle"],
+            "critic": LiteralString(rule["critic"]),
+            "revision": LiteralString(rule["revision"]),
+        }
+        for rule in rules
+    ]
+    return yaml.dump(
+        yaml_rules,
+        Dumper=RulesetDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        width=1000,
     )
 
 
-def validate_constitution(path: str | Path) -> list[str]:
-    """Return validation warnings. Parsing errors are raised."""
+def validate_markdown(path: str | Path) -> list[str]:
+    """Validate source Markdown without compiling it."""
 
-    constitution = load_constitution(path)
+    content = Path(path).read_text(encoding="utf-8")
+    if not content.strip():
+        raise ConstitutionError("constitution Markdown is empty")
     warnings: list[str] = []
-
-    if not constitution.id:
-        warnings.append("constitution id is empty")
-
-    for principle in constitution.principles:
-        if principle.weight <= 0:
-            warnings.append(f"{principle.id}: weight should be positive")
-        if not principle.tags:
-            warnings.append(f"{principle.id}: no tags set")
-        if len(principle.critique.split()) < 8:
-            warnings.append(f"{principle.id}: critique prompt is very short")
-        if len(principle.revision.split()) < 8:
-            warnings.append(f"{principle.id}: revision prompt is very short")
-
+    if not _find_title(content):
+        warnings.append("source Markdown has no top-level title")
     return warnings
 
 
-def _split_front_matter(source: str) -> tuple[dict[str, object], str]:
-    if not source.startswith(FRONT_MATTER):
-        raise ConstitutionError("constitution must start with TOML front matter delimited by +++")
+def validate_ruleset(path: str | Path) -> list[str]:
+    """Validate a generated YAML ruleset."""
 
     try:
-        _, raw_metadata, content = source.split(FRONT_MATTER, 2)
-    except ValueError as exc:
-        raise ConstitutionError("front matter must be closed with +++") from exc
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConstitutionError(f"invalid YAML ruleset: {exc}") from exc
 
-    try:
-        metadata = tomllib.loads(raw_metadata)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConstitutionError(f"invalid TOML front matter: {exc}") from exc
+    if not isinstance(payload, list):
+        raise ConstitutionError("ruleset YAML must be a top-level array")
 
-    return metadata, content.strip()
-
-
-def _parse_principles(content: str) -> Iterable[Principle]:
-    lines = content.splitlines()
-    starts = [(index, PRINCIPLE_HEADING.match(line)) for index, line in enumerate(lines)]
-    starts = [(index, match) for index, match in starts if match]
-
-    for offset, (start, match) in enumerate(starts):
-        assert match is not None
-        end = starts[offset + 1][0] if offset + 1 < len(starts) else len(lines)
-        section_lines = lines[start + 1 : end]
-        yield _parse_principle(
-            principle_id=match.group("id"),
-            title=match.group("title"),
-            lines=section_lines,
-        )
+    rules = [_validate_rule(rule, index) for index, rule in enumerate(payload, start=1)]
+    if not rules:
+        raise ConstitutionError("ruleset YAML must contain at least one rule")
+    _ensure_unique("rule id", (rule["id"] for rule in rules))
+    return []
 
 
-def _parse_principle(principle_id: str, title: str, lines: list[str]) -> Principle:
-    fields: dict[str, str] = {}
-    sections: dict[str, list[str]] = {"body": []}
-    current = "body"
+def _compiler_messages(markdown: str) -> list[dict[str, str]]:
+    categories = "\n".join(f"- {category}" for category in KNOWN_CATEGORIES)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You compile freeform Constitutional AI source documents into executable rulesets. "
+                "Return only valid JSON. Do not wrap the JSON in Markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""Transform the full Markdown constitution below into a JSON object with this exact shape:
 
-    for line in lines:
-        subheading = SUBHEADING.match(line)
-        if subheading:
-            current = subheading.group("title").strip().lower()
-            sections.setdefault(current, [])
-            continue
+{{
+  "rules": [
+    {{
+      "id": "principle-01-category-name",
+      "category": "category-name",
+      "principle": "Human-readable principle copied or lightly normalized from the source.",
+      "critic": "Prompt for critiquing an assistant response against this principle.",
+      "revision": "Prompt for revising an assistant response against this principle."
+    }}
+  ]
+}}
 
-        if current == "body" and ":" in line:
-            key, value = line.split(":", 1)
-            normalized_key = key.strip().lower()
-            if normalized_key in {"tags", "weight"}:
-                fields[normalized_key] = value.strip()
-                continue
+Rules:
+- Extract the author's intended principles from the entire Markdown document.
+- Preserve meaning; do not invent unrelated principles.
+- Use one rule per distinct principle.
+- Use stable lower-kebab-case ids.
+- Use these categories when possible:
+{categories}
+- If no category fits, use "moral-standards".
+- Keep critic and revision prompts directly actionable for a CAI critique/revision loop.
+- Every rule must contain exactly: id, category, principle, critic, revision.
+- Return JSON only.
 
-        sections.setdefault(current, []).append(line)
-
-    tags = tuple(tag.strip() for tag in fields.get("tags", "").split(",") if tag.strip())
-    try:
-        weight = float(fields.get("weight", "1.0"))
-    except ValueError as exc:
-        raise ConstitutionError(f"{principle_id}: Weight must be a number") from exc
-
-    body = _clean_section(sections.get("body", []))
-    critique = _clean_section(sections.get("critique", []))
-    revision = _clean_section(sections.get("revision", []))
-
-    missing = [
-        name
-        for name, value in (
-            ("Tags", tags),
-            ("Critique", critique),
-            ("Revision", revision),
-        )
-        if not value
+Markdown constitution:
+```markdown
+{markdown}
+```""",
+        },
     ]
+
+
+def _validate_rule(raw_rule: object, index: int) -> dict[str, str]:
+    if not isinstance(raw_rule, Mapping):
+        raise ConstitutionError(f"rule {index}: must be an object")
+
+    keys = set(raw_rule)
+    expected = set(RULE_FIELDS)
+    missing = expected - keys
+    extra = keys - expected
     if missing:
-        raise ConstitutionError(f"{principle_id}: missing required sections: {', '.join(missing)}")
+        raise ConstitutionError(f"rule {index}: missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise ConstitutionError(f"rule {index}: unexpected fields: {', '.join(sorted(extra))}")
 
-    return Principle(
-        id=principle_id,
-        title=title,
-        tags=tags,
-        weight=weight,
-        body=body,
-        critique=critique,
-        revision=revision,
-    )
+    rule: dict[str, str] = {}
+    for field in RULE_FIELDS:
+        value = raw_rule[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ConstitutionError(f"rule {index}: {field} must be a non-empty string")
+        rule[field] = value.strip()
+
+    if not RULE_ID.match(rule["id"]):
+        raise ConstitutionError(f"rule {index}: id must be lower-kebab-case")
+    if rule["category"] not in KNOWN_CATEGORIES:
+        raise ConstitutionError(f"rule {index}: unknown category {rule['category']!r}")
+
+    return rule
 
 
-def _clean_section(lines: Iterable[str]) -> str:
-    return "\n".join(lines).strip()
+def _find_title(markdown: str) -> str | None:
+    match = HEADING.search(markdown)
+    if not match:
+        return None
+    return match.group("title").strip()
 
 
 def _ensure_unique(label: str, values: Iterable[str]) -> None:
@@ -201,19 +256,39 @@ def _ensure_unique(label: str, values: Iterable[str]) -> None:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     try:
-        constitution = load_constitution(args.path)
-        warnings = validate_constitution(args.path)
+        warnings = validate_ruleset(args.path) if args.path.suffix in {".yaml", ".yml"} else validate_markdown(args.path)
     except ConstitutionError as exc:
         print(f"invalid: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        f"valid: {constitution.id} v{constitution.version} "
-        f"({len(constitution.principles)} principles)"
-    )
+    print(f"valid: {args.path}")
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
+    return 0
+
+
+def _cmd_compile(args: argparse.Namespace) -> int:
+    try:
+        markdown = args.path.read_text(encoding="utf-8")
+        client = OpenRouterClient(settings_from_env(args.env))
+        rules = compile_markdown(
+            markdown,
+            client,
+            model=args.model,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+        )
+    except (ConstitutionError, OpenRouterError) as exc:
+        print(f"invalid: {exc}", file=sys.stderr)
+        return 1
+
+    text = ruleset_to_yaml(rules)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text, encoding="utf-8")
+    else:
+        print(text, end="")
     return 0
 
 
@@ -221,9 +296,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Constitution helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    validate = subparsers.add_parser("validate", help="validate a constitution Markdown file")
+    validate = subparsers.add_parser("validate", help="validate source Markdown or ruleset YAML")
     validate.add_argument("path", type=Path)
     validate.set_defaults(func=_cmd_validate)
+
+    compile_parser = subparsers.add_parser("compile", help="compile Markdown to editable ruleset YAML")
+    compile_parser.add_argument("path", type=Path)
+    compile_parser.add_argument("-o", "--output", type=Path)
+    compile_parser.add_argument("--env", type=Path, default=Path(".env"))
+    compile_parser.add_argument("--model")
+    compile_parser.add_argument("--temperature", type=float, default=0.0)
+    compile_parser.add_argument("--max-tokens", type=int, default=4000)
+    compile_parser.set_defaults(func=_cmd_compile)
 
     return parser
 
