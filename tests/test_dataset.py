@@ -5,10 +5,14 @@ import unittest
 from unittest import mock
 
 from cai.dataset import (
+    APPLY_RULES_MODEL,
+    APPLY_RULES_REASONING,
     DEFAULT_ASSISTANT_SYSTEM_PROMPT,
     DatasetError,
     Rule,
     SourcePrompt,
+    _reasoning_from_args,
+    build_parser,
     completed_indices,
     critic_response_format,
     critic_result_from_json,
@@ -143,6 +147,25 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
         self.assertEqual(response_format["json_schema"]["schema"]["additionalProperties"], False)  # type: ignore[index]
 
+    def test_generate_reasoning_defaults_do_not_block_token_budget_override(self) -> None:
+        parser = build_parser()
+
+        default_args = parser.parse_args(["generate", "--rules", "rules.yaml", "--output", "out.jsonl"])
+        token_budget_args = parser.parse_args(
+            [
+                "generate",
+                "--rules",
+                "rules.yaml",
+                "--output",
+                "out.jsonl",
+                "--reasoning-max-tokens",
+                "2048",
+            ]
+        )
+
+        self.assertEqual(_reasoning_from_args(default_args), {"effort": "medium", "exclude": True})
+        self.assertEqual(_reasoning_from_args(token_budget_args), {"max_tokens": 2048, "exclude": True})
+
     def test_rejects_invalid_structured_critic_result(self) -> None:
         with self.assertRaisesRegex(DatasetError, "revision_needed"):
             critic_result_from_json('{"revision_needed": "false", "critique": "No issue."}')
@@ -166,8 +189,12 @@ class DatasetTests(unittest.TestCase):
             ],
         )
         self.assertIn("Critic", client.calls[1][0][3]["content"])
+        self.assertEqual(client.calls[0][1]["model"], APPLY_RULES_MODEL)
+        self.assertEqual(client.calls[0][1]["reasoning"], APPLY_RULES_REASONING)
+        self.assertEqual(client.calls[0][1]["max_tokens"], 6000)
         self.assertEqual(client.calls[1][1]["response_format"]["type"], "json_schema")
         self.assertEqual(client.calls[1][1]["response_format"]["json_schema"]["name"], "critic_result")
+        self.assertEqual(client.calls[1][1]["reasoning"], APPLY_RULES_REASONING)
         self.assertIn("Revision", client.calls[2][0][5]["content"])
 
     def test_generate_record_skips_revision_when_critic_says_revision_not_needed(self) -> None:

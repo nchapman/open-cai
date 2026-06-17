@@ -14,7 +14,11 @@ from typing import Mapping, Sequence
 
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
+DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4-flash"
+COMPILER_MODEL = "deepseek/deepseek-v4-pro"
+APPLY_RULES_MODEL = "deepseek/deepseek-v4-flash"
+COMPILER_REASONING = {"effort": "high", "exclude": True}
+APPLY_RULES_REASONING = {"effort": "medium", "exclude": True}
 
 
 Message = Mapping[str, str]
@@ -28,7 +32,6 @@ class OpenRouterError(RuntimeError):
 class OpenRouterSettings:
     api_key: str
     base_url: str = DEFAULT_BASE_URL
-    model: str = DEFAULT_MODEL
     app_url: str | None = None
     app_title: str | None = None
 
@@ -63,7 +66,6 @@ def settings_from_env(env_path: str | Path = ".env") -> OpenRouterSettings:
     return OpenRouterSettings(
         api_key=api_key,
         base_url=os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/"),
-        model=os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL).strip(),
         app_url=os.getenv("APP_URL"),
         app_title=os.getenv("APP_TITLE"),
     )
@@ -83,15 +85,18 @@ class OpenRouterClient:
         temperature: float = 0.7,
         max_tokens: int = 1000,
         response_format: Mapping[str, object] | None = None,
+        reasoning: Mapping[str, object] | None = None,
     ) -> str:
         payload = {
-            "model": model or self.settings.model,
+            "model": model or DEFAULT_CHAT_MODEL,
             "messages": list(messages),
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if response_format is not None:
             payload["response_format"] = dict(response_format)
+        if reasoning is not None:
+            payload["reasoning"] = dict(reasoning)
         response = self._post("/chat/completions", payload)
         try:
             return str(response["choices"][0]["message"]["content"])
@@ -134,6 +139,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             model=args.model,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            reasoning=_reasoning_from_args(args),
         )
     except OpenRouterError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -153,9 +159,26 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--model")
     chat.add_argument("--temperature", type=float, default=0.7)
     chat.add_argument("--max-tokens", type=int, default=1000)
+    chat.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
+    chat.add_argument("--reasoning-max-tokens", type=int)
+    chat.add_argument("--include-reasoning", action="store_true")
     chat.set_defaults(func=_cmd_chat)
 
     return parser
+
+
+def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+    if args.reasoning_effort and args.reasoning_max_tokens is not None:
+        raise OpenRouterError("use either --reasoning-effort or --reasoning-max-tokens, not both")
+    if not args.reasoning_effort and args.reasoning_max_tokens is None:
+        return None
+
+    reasoning: dict[str, object] = {"exclude": not args.include_reasoning}
+    if args.reasoning_effort:
+        reasoning["effort"] = args.reasoning_effort
+    else:
+        reasoning["max_tokens"] = args.reasoning_max_tokens
+    return reasoning
 
 
 def main(argv: list[str] | None = None) -> int:

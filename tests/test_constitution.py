@@ -7,12 +7,16 @@ import yaml
 
 from cai.constitution import (
     ConstitutionError,
+    _reasoning_from_args,
+    build_parser,
+    compiler_response_format,
     compile_markdown,
     ruleset_from_json,
     ruleset_to_yaml,
     validate_markdown,
     validate_ruleset,
 )
+from cai.openrouter import COMPILER_MODEL, COMPILER_REASONING
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,8 +65,11 @@ class ConstitutionTests(unittest.TestCase):
         prompt = client.calls[0][0][1]["content"]
 
         self.assertEqual(rules[0]["category"], "privacy-consent")
-        self.assertEqual(client.calls[0][1]["response_format"], {"type": "json_object"})
+        self.assertEqual(client.calls[0][1]["model"], COMPILER_MODEL)
+        self.assertEqual(client.calls[0][1]["response_format"], compiler_response_format())
+        self.assertEqual(client.calls[0][1]["reasoning"], COMPILER_REASONING)
         self.assertEqual(client.calls[0][1]["temperature"], 0.0)
+        self.assertEqual(client.calls[0][1]["max_tokens"], 32000)
         self.assertIn("Crispness requirements", prompt)
         self.assertIn("observable test", prompt)
         self.assertIn("when the rule applies", prompt)
@@ -75,6 +82,29 @@ class ConstitutionTests(unittest.TestCase):
         self.assertIn("Permissive constitutions", prompt)
         self.assertIn("source Markdown as authoritative", prompt)
         self.assertIn("routing labels", prompt)
+
+    def test_compiler_response_format_uses_strict_json_schema(self) -> None:
+        response_format = compiler_response_format()
+
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertEqual(response_format["json_schema"]["name"], "constitution_ruleset")  # type: ignore[index]
+        self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
+        schema = response_format["json_schema"]["schema"]  # type: ignore[index]
+        self.assertEqual(schema["additionalProperties"], False)  # type: ignore[index]
+        rule_schema = schema["properties"]["rules"]["items"]  # type: ignore[index]
+        self.assertEqual(rule_schema["required"], ["id", "category", "principle", "critic", "revision"])
+        self.assertEqual(rule_schema["additionalProperties"], False)
+
+    def test_compile_reasoning_defaults_do_not_block_token_budget_override(self) -> None:
+        parser = build_parser()
+
+        default_args = parser.parse_args(["compile", "constitution.md"])
+        token_budget_args = parser.parse_args(
+            ["compile", "constitution.md", "--reasoning-max-tokens", "4096", "--include-reasoning"]
+        )
+
+        self.assertEqual(_reasoning_from_args(default_args), {"effort": "high", "exclude": True})
+        self.assertEqual(_reasoning_from_args(token_budget_args), {"max_tokens": 4096, "exclude": False})
 
     def test_serializes_ruleset_to_reviewable_yaml(self) -> None:
         rules = [

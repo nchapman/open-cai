@@ -16,7 +16,13 @@ from typing import Iterable, Mapping, Sequence
 import yaml
 
 from cai.constitution import validate_ruleset
-from cai.openrouter import OpenRouterClient, OpenRouterError, settings_from_env
+from cai.openrouter import (
+    APPLY_RULES_MODEL,
+    APPLY_RULES_REASONING,
+    OpenRouterClient,
+    OpenRouterError,
+    settings_from_env,
+)
 
 
 DEFAULT_DATASET = "Anthropic/hh-rlhf"
@@ -24,7 +30,7 @@ DEFAULT_DATA_DIR = "harmless-base"
 DEFAULT_SPLIT = "train"
 DEFAULT_MAX_SAMPLES = 128
 DEFAULT_CONCURRENCY = 16
-DEFAULT_MAX_TOKENS = 1500
+DEFAULT_MAX_TOKENS = 6000
 DEFAULT_TEMPERATURE = 1.0
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
 DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
@@ -284,10 +290,11 @@ def generate_record(
     client: OpenRouterClient,
     source: SourcePrompt,
     rule: Rule,
-    model: str | None = None,
+    model: str | None = APPLY_RULES_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     retries: int = 2,
+    reasoning: Mapping[str, object] | None = APPLY_RULES_REASONING,
 ) -> dict[str, object]:
     """Run initial-response, critique, and revision calls for one source prompt."""
 
@@ -305,6 +312,7 @@ def generate_record(
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
+        reasoning=reasoning,
     )
     messages.append({"role": "assistant", "content": init_response})
     messages.append({"role": "user", "content": critic_prompt})
@@ -317,6 +325,7 @@ def generate_record(
         max_tokens=max_tokens,
         retries=retries,
         response_format=critic_response_format(),
+        reasoning=reasoning,
     )
     critic_result = critic_result_from_json(critic_raw_response)
     critic_response = str(critic_result["critique"])
@@ -343,6 +352,7 @@ def generate_record(
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
+        reasoning=reasoning,
     )
 
     return make_record(
@@ -366,6 +376,7 @@ def _chat_with_retries(
     max_tokens: int,
     retries: int,
     response_format: Mapping[str, object] | None = None,
+    reasoning: Mapping[str, object] | None = None,
 ) -> str:
     for attempt in range(retries + 1):
         try:
@@ -376,6 +387,7 @@ def _chat_with_retries(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format=response_format,
+                    reasoning=reasoning,
                 )
             )
         except OpenRouterError:
@@ -404,6 +416,7 @@ def generate_dataset(args: argparse.Namespace) -> int:
         )
         pending = [source for source in sources if source.source_index not in completed]
         client = OpenRouterClient(settings_from_env(args.env))
+        reasoning = _reasoning_from_args(args)
     except (DatasetError, OpenRouterError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -428,6 +441,7 @@ def generate_dataset(args: argparse.Namespace) -> int:
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
                 retries=args.retries,
+                reasoning=reasoning,
             ): source
             for source in pending
         }
@@ -462,13 +476,29 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     generate.add_argument("--seed", type=int, default=0)
     generate.add_argument("--env", type=Path, default=Path(".env"))
-    generate.add_argument("--model")
+    generate.add_argument("--model", default=APPLY_RULES_MODEL)
     generate.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     generate.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    reasoning = generate.add_mutually_exclusive_group()
+    reasoning.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
+    reasoning.add_argument("--reasoning-max-tokens", type=int)
+    generate.add_argument("--include-reasoning", action="store_true")
     generate.add_argument("--retries", type=int, default=2)
     generate.set_defaults(func=generate_dataset)
 
     return parser
+
+
+def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+    if args.reasoning_effort and args.reasoning_max_tokens is not None:
+        raise DatasetError("use either --reasoning-effort or --reasoning-max-tokens, not both")
+
+    reasoning: dict[str, object] = {"exclude": not args.include_reasoning}
+    if args.reasoning_max_tokens is not None:
+        reasoning["max_tokens"] = args.reasoning_max_tokens
+    else:
+        reasoning["effort"] = args.reasoning_effort or APPLY_RULES_REASONING["effort"]
+    return reasoning
 
 
 def main(argv: list[str] | None = None) -> int:

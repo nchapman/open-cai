@@ -55,6 +55,16 @@ canonical `constitutions/compiled/*.rules.yaml` path.
 Inference uses OpenRouter's OpenAI-compatible chat completions API. Create a
 local `.env` from `.env.example` and set `OPENROUTER_API_KEY`.
 
+Model roles are code defaults, not `.env` settings. Rule compilation uses
+`deepseek/deepseek-v4-pro` with high reasoning. Dataset generation uses
+`deepseek/deepseek-v4-flash` with medium reasoning. Both CLIs expose `--model`,
+`--reasoning-effort`, `--reasoning-max-tokens`, and `--max-tokens` overrides for
+experiments.
+
+Model calls that expect JSON use OpenRouter `json_schema` response formats, not
+prompt-only JSON instructions. The current structured calls are constitution
+compilation and rule critique.
+
 Try a one-off request with:
 
 ```bash

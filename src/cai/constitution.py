@@ -11,7 +11,13 @@ from typing import Iterable, Mapping
 
 import yaml
 
-from cai.openrouter import OpenRouterClient, OpenRouterError, settings_from_env
+from cai.openrouter import (
+    COMPILER_MODEL,
+    COMPILER_REASONING,
+    OpenRouterClient,
+    OpenRouterError,
+    settings_from_env,
+)
 
 
 RULE_FIELDS = ("id", "category", "principle", "critic", "revision")
@@ -37,6 +43,29 @@ CATEGORY_DESCRIPTIONS = (
 )
 
 KNOWN_CATEGORIES = tuple(category for category, _ in CATEGORY_DESCRIPTIONS)
+COMPILER_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "rules": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+                    "category": {"type": "string", "enum": list(KNOWN_CATEGORIES)},
+                    "principle": {"type": "string", "minLength": 1},
+                    "critic": {"type": "string", "minLength": 1},
+                    "revision": {"type": "string", "minLength": 1},
+                },
+                "required": list(RULE_FIELDS),
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["rules"],
+    "additionalProperties": False,
+}
 
 
 class ConstitutionError(ValueError):
@@ -65,9 +94,10 @@ def compile_markdown(
     markdown: str,
     client: OpenRouterClient,
     *,
-    model: str | None = None,
+    model: str | None = COMPILER_MODEL,
     temperature: float = 0.0,
-    max_tokens: int = 12000,
+    max_tokens: int = 32000,
+    reasoning: Mapping[str, object] | None = COMPILER_REASONING,
 ) -> list[dict[str, str]]:
     """Compile a complete Markdown constitution through an OpenRouter model."""
 
@@ -79,7 +109,8 @@ def compile_markdown(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        response_format={"type": "json_object"},
+        response_format=compiler_response_format(),
+        reasoning=reasoning,
     )
     return ruleset_from_json(response)
 
@@ -130,6 +161,19 @@ def ruleset_to_yaml(rules: list[dict[str, str]]) -> str:
         allow_unicode=True,
         width=1000,
     )
+
+
+def compiler_response_format() -> dict[str, object]:
+    """Return OpenRouter's strict JSON Schema response format for compiler calls."""
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "constitution_ruleset",
+            "strict": True,
+            "schema": COMPILER_RESPONSE_SCHEMA,
+        },
+    }
 
 
 def validate_markdown(path: str | Path) -> list[str]:
@@ -302,6 +346,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
             model=args.model,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            reasoning=_reasoning_from_args(args),
         )
     except (ConstitutionError, OpenRouterError) as exc:
         print(f"invalid: {exc}", file=sys.stderr)
@@ -328,12 +373,28 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("path", type=Path)
     compile_parser.add_argument("-o", "--output", type=Path)
     compile_parser.add_argument("--env", type=Path, default=Path(".env"))
-    compile_parser.add_argument("--model")
+    compile_parser.add_argument("--model", default=COMPILER_MODEL)
     compile_parser.add_argument("--temperature", type=float, default=0.0)
-    compile_parser.add_argument("--max-tokens", type=int, default=12000)
+    compile_parser.add_argument("--max-tokens", type=int, default=32000)
+    reasoning = compile_parser.add_mutually_exclusive_group()
+    reasoning.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
+    reasoning.add_argument("--reasoning-max-tokens", type=int)
+    compile_parser.add_argument("--include-reasoning", action="store_true")
     compile_parser.set_defaults(func=_cmd_compile)
 
     return parser
+
+
+def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+    if args.reasoning_effort and args.reasoning_max_tokens is not None:
+        raise ConstitutionError("use either --reasoning-effort or --reasoning-max-tokens, not both")
+
+    reasoning: dict[str, object] = {"exclude": not args.include_reasoning}
+    if args.reasoning_max_tokens is not None:
+        reasoning["max_tokens"] = args.reasoning_max_tokens
+    else:
+        reasoning["effort"] = args.reasoning_effort or COMPILER_REASONING["effort"]
+    return reasoning
 
 
 def main(argv: list[str] | None = None) -> int:
