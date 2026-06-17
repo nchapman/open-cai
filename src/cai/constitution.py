@@ -17,23 +17,26 @@ from cai.openrouter import OpenRouterClient, OpenRouterError, settings_from_env
 RULE_FIELDS = ("id", "category", "principle", "critic", "revision")
 RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
+COMPILER_PROMPT_VERSION = "v6-source-faithful-balanced-posture"
 
-KNOWN_CATEGORIES = (
-    "age-appropriate",
-    "social-bias",
-    "criminal-activity",
-    "harmful-general",
-    "baiting",
-    "dangerous-advice",
-    "empathy-support",
-    "gender-bias",
-    "harmful-assumptions",
-    "moral-standards",
-    "privacy-consent",
-    "deception-manipulation",
-    "high-impact-advice",
-    "preserve-helpfulness",
+CATEGORY_DESCRIPTIONS = (
+    ("age-appropriate", "children, minors, dependent people, vulnerable people, abuse or exploitation risk, and age-appropriate handling"),
+    ("social-bias", "insensitive, racist, sexist, hateful, demeaning, harassing, or socially inappropriate content"),
+    ("criminal-activity", "violence, theft, hacking, robbery, evasion, unauthorized access, or other criminal plans"),
+    ("harmful-general", "broad harmful, unethical, toxic, dangerous, or illegal content that does not fit a narrower category"),
+    ("baiting", "requests that try to elicit harmful content, jailbreak behavior, or unsafe compliance"),
+    ("dangerous-advice", "legally questionable, physically dangerous, or risk-increasing advice"),
+    ("empathy-support", "self-harm, abuse, acute distress, crisis support, emotional support, and empathetic response quality"),
+    ("gender-bias", "misogyny, sexism, sexual degradation, or gender-biased content"),
+    ("harmful-assumptions", "harmful assumptions in the user request or assistant response that should be challenged or corrected"),
+    ("moral-standards", "commonsense ethical or moral objectionability that does not fit a narrower category"),
+    ("privacy-consent", "privacy, consent, personal data, tracking, impersonation, credentials, or bypassing privacy protections"),
+    ("deception-manipulation", "fraud, impersonation, coercion, exploitation, manipulation, or bad-faith persuasion"),
+    ("high-impact-advice", "medical, legal, financial, or similarly high-impact advice where uncertainty and professional judgment matter"),
+    ("preserve-helpfulness", "over-refusal, safe alternatives, answering benign parts, and preserving helpfulness within safety limits"),
 )
+
+KNOWN_CATEGORIES = tuple(category for category, _ in CATEGORY_DESCRIPTIONS)
 
 
 class ConstitutionError(ValueError):
@@ -160,18 +163,21 @@ def validate_ruleset(path: str | Path) -> list[str]:
 
 
 def _compiler_messages(markdown: str) -> list[dict[str, str]]:
-    categories = "\n".join(f"- {category}" for category in KNOWN_CATEGORIES)
+    categories = "\n".join(f"- {category}: {description}" for category, description in CATEGORY_DESCRIPTIONS)
     return [
         {
             "role": "system",
             "content": (
-                "You compile freeform Constitutional AI source documents into executable rulesets. "
+                "You are a rigorous source-faithful policy compiler. "
+                "You turn freeform source documents into crisp executable critique/revision rules without importing unstated policy assumptions. "
                 "Return only valid JSON. Do not wrap the JSON in Markdown."
             ),
         },
         {
             "role": "user",
-            "content": f"""Transform the full Markdown constitution below into a JSON object with this exact shape:
+            "content": f"""Compiler prompt version: {COMPILER_PROMPT_VERSION}
+
+Transform the full Markdown constitution below into a JSON object with this exact shape:
 
 {{
   "rules": [
@@ -188,14 +194,29 @@ def _compiler_messages(markdown: str) -> list[dict[str, str]]:
 Rules:
 - Extract the author's intended principles from the entire Markdown document.
 - Preserve meaning; do not invent unrelated principles.
+- Treat the source Markdown as authoritative. Do not assume the constitution is strict, balanced, permissive, safety-focused, humor-focused, or helpfulness-focused unless the source says so.
 - Use one rule per distinct principle.
 - Use stable lower-kebab-case ids.
 - Use these categories when possible:
 {categories}
 - If no category fits, use "moral-standards".
-- Keep critic and revision prompts directly actionable for a CAI critique/revision loop.
+- Use categories only as routing labels for the rules. Do not add category-specific obligations that are not present in the source.
 - Every rule must contain exactly: id, category, principle, critic, revision.
 - Return JSON only.
+
+Crispness requirements:
+- Keep each rule narrow enough to produce a meaningfully different critique/revision from the other rules.
+- If one source bullet contains multiple independent obligations, split it into multiple rules. If the obligations share one behavioral test, keep them together.
+- The principle should be a short, plain-language statement of the rule. Prefer one sentence.
+- The critic must be an observable test for the assistant response. It should say what concrete behavior to inspect for and should ask the critic to point out the offending content or missing behavior.
+- The revision must say what to remove, what to preserve, and what safe alternative, redirect, correction, or next step to provide when relevant.
+- Avoid mushy wording such as "be appropriate", "use care", "ensure safety", or "follow the principle" unless paired with concrete criteria.
+- Use concrete verbs such as identify, remove, replace, preserve, redirect, correct, refuse, answer, recommend, or ask.
+- Preserve requested style from the source, such as humor or light wit, only when it does not undermine safety or dignity.
+- Preserve the source constitution's risk posture. Strict constitutions should flag ambiguity, borderline enablement, and missing safeguards. Balanced constitutions should balance useful answers with safety limits. Permissive constitutions should flag over-refusal and preserve as much benign, educational, fictional, analytical, or defensive detail as possible while still removing actionable harm.
+- Do not flatten strict, balanced, and permissive constitutions into the same generic safety behavior.
+- If the source is not a safety constitution, do not transform it into one. Produce rules that faithfully express the source's actual goals.
+- Do not add broad generic safety rules that are not grounded in the source Markdown.
 
 Markdown constitution:
 ```markdown

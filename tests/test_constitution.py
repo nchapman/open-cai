@@ -31,8 +31,10 @@ class FakeClient:
 class ConstitutionTests(unittest.TestCase):
     def test_validates_source_markdown_without_parsing_principles(self) -> None:
         for path in [
-            ROOT / "constitutions" / "core.md",
-            ROOT / "constitutions" / "grok.md",
+            ROOT / "constitutions" / "strict.md",
+            ROOT / "constitutions" / "balanced.md",
+            ROOT / "constitutions" / "permissive.md",
+            ROOT / "constitutions" / "playful.md",
         ]:
             with self.subTest(path=path):
                 warnings = validate_markdown(path)
@@ -56,10 +58,20 @@ class ConstitutionTests(unittest.TestCase):
         client = FakeClient(response)
 
         rules = compile_markdown("# Local\n\n- It should protect private data.", client)  # type: ignore[arg-type]
+        prompt = client.calls[0][0][1]["content"]
 
         self.assertEqual(rules[0]["category"], "privacy-consent")
         self.assertEqual(client.calls[0][1]["response_format"], {"type": "json_object"})
         self.assertEqual(client.calls[0][1]["temperature"], 0.0)
+        self.assertIn("Crispness requirements", prompt)
+        self.assertIn("observable test", prompt)
+        self.assertIn("what to remove, what to preserve", prompt)
+        self.assertIn("risk posture", prompt)
+        self.assertIn("Strict constitutions", prompt)
+        self.assertIn("Balanced constitutions", prompt)
+        self.assertIn("Permissive constitutions", prompt)
+        self.assertIn("source Markdown as authoritative", prompt)
+        self.assertIn("routing labels", prompt)
 
     def test_serializes_ruleset_to_reviewable_yaml(self) -> None:
         rules = [
@@ -99,6 +111,16 @@ class ConstitutionTests(unittest.TestCase):
             warnings = validate_ruleset(path)
 
         self.assertEqual(warnings, [])
+
+    def test_validates_canonical_rulesets(self) -> None:
+        paths = sorted((ROOT / "constitutions" / "compiled").glob("*.rules.yaml"))
+        self.assertGreaterEqual(len(paths), 4)
+
+        for path in paths:
+            with self.subTest(path=path):
+                warnings = validate_ruleset(path)
+
+                self.assertEqual(warnings, [])
 
     def test_rejects_invalid_model_json(self) -> None:
         with self.assertRaisesRegex(ConstitutionError, "missing fields"):

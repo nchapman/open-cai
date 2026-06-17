@@ -20,23 +20,35 @@ has only `id`, `category`, `principle`, `critic`, and `revision`.
 Validate a source constitution with:
 
 ```bash
-uv run cai-constitution validate constitutions/core.md
+uv run cai-constitution validate constitutions/balanced.md
 ```
 
-Compile it to a reviewable YAML ruleset with OpenRouter:
+Compile a constitution to a reviewable YAML ruleset with OpenRouter:
 
 ```bash
-uv run cai-constitution compile constitutions/core.md -o constitutions/compiled/core.rules.yaml
+uv run cai-constitution compile constitutions/balanced.md -o constitutions/compiled/balanced.rules.yaml
 ```
 
-There is also a Grok-style example:
+The main examples are a posture spectrum:
 
 ```bash
-uv run cai-constitution compile constitutions/grok.md -o constitutions/compiled/grok.rules.yaml
+uv run cai-constitution compile constitutions/strict.md -o constitutions/compiled/strict.rules.yaml
+uv run cai-constitution compile constitutions/balanced.md -o constitutions/compiled/balanced.rules.yaml
+uv run cai-constitution compile constitutions/permissive.md -o constitutions/compiled/permissive.rules.yaml
+```
+
+There is also a playful tone example:
+
+```bash
+uv run cai-constitution compile constitutions/playful.md -o constitutions/compiled/playful.rules.yaml
 ```
 
 The pipeline should consume the reviewed YAML ruleset, not silently recompile
 Markdown during an experiment.
+
+When tuning the compiler prompt, keep versioned outputs under
+`constitutions/compiled/versions/` before promoting a new ruleset to the
+canonical `constitutions/compiled/*.rules.yaml` path.
 
 ## OpenRouter
 
