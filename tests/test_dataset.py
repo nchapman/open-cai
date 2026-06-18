@@ -6,6 +6,7 @@ from unittest import mock
 
 from cai.dataset import (
     DEFAULT_ASSISTANT_SYSTEM_PROMPT,
+    DEFAULT_TEMPERATURE,
     DatasetError,
     GUIDE_APPLICATION_MODEL,
     GUIDE_APPLICATION_REASONING,
@@ -271,6 +272,7 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("guided answer", client.calls[2][0][0]["content"])
         self.assertEqual(client.calls[0][1]["model"], GUIDE_APPLICATION_MODEL)
         self.assertEqual(client.calls[0][1]["reasoning"], GUIDE_APPLICATION_REASONING)
+        self.assertEqual(client.calls[0][1]["temperature"], DEFAULT_TEMPERATURE)
         self.assertEqual(client.calls[0][1]["max_tokens"], 6000)
         self.assertEqual(client.calls[2][1]["response_format"]["type"], "json_schema")
         self.assertEqual(client.calls[2][1]["response_format"]["json_schema"]["name"], "guide_metadata")
