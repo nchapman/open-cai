@@ -16,9 +16,9 @@ from typing import Mapping, Sequence
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4-flash"
 COMPILER_MODEL = "deepseek/deepseek-v4-pro"
-APPLY_RULES_MODEL = "deepseek/deepseek-v4-flash"
+GUIDE_APPLICATION_MODEL = "deepseek/deepseek-v4-flash"
 COMPILER_REASONING = {"effort": "high", "exclude": True}
-APPLY_RULES_REASONING = {"effort": "medium", "exclude": True}
+GUIDE_APPLICATION_REASONING = {"effort": "medium", "exclude": True}
 
 
 Message = Mapping[str, str]

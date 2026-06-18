@@ -20,10 +20,10 @@ This constitution describes the baseline assistant behavior we want.
 - It should preserve safe helpfulness instead of over-refusing.
 ```
 
-Generate an executable ruleset with:
+Generate an operational response guide with:
 
 ```bash
-uv run cai-constitution compile constitutions/balanced.md -o constitutions/compiled/balanced.rules.yaml
+uv run cai-constitution compile constitutions/balanced.md -o constitutions/guides/balanced.guide.md
 ```
 
 The repo includes a risk-posture spectrum:
@@ -38,16 +38,17 @@ It also includes `playful.md`, a smaller style variant for direct callouts with
 light wit.
 
 The compiler sends the full Markdown document to an OpenRouter model, validates
-the returned JSON, then writes YAML. The generated YAML is a single array of
-rules. Each rule has:
+the returned JSON, then writes Markdown. The generated guide is designed to be
+read by people and by the data-generation model. It includes:
 
-- `id`
-- `category`
-- `principle`
-- `critic`
-- `revision`
+- an overview
+- the intended response posture
+- guide sections with stable IDs
+- applicability criteria
+- concrete do/avoid guidance
+- examples of good and bad responses
 
-Review and edit the YAML by hand before using it in a pipeline run.
+Review and edit the Markdown guide by hand before using it in a pipeline run.
 
 When changing the compiler prompt or source constitution, keep generated
-comparison versions in `compiled/versions/` until the new output is reviewed.
+comparison versions in `guides/versions/` until the new output is reviewed.

@@ -1,4 +1,4 @@
-"""Compile freeform constitution Markdown into editable ruleset YAML."""
+"""Compile freeform constitution Markdown into human-editable response guides."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import sys
 from pathlib import Path
 from typing import Iterable, Mapping
 
-import yaml
-
 from cai.openrouter import (
     COMPILER_MODEL,
     COMPILER_REASONING,
@@ -20,74 +18,57 @@ from cai.openrouter import (
 )
 
 
-RULE_FIELDS = ("id", "category", "principle", "critic", "revision")
-RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+GUIDE_SECTION_FIELDS = ("id", "title", "when_to_apply", "do", "avoid", "examples")
+GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad", "notes")
+GUIDE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v7-objective-applicability-minimal-revision"
+COMPILER_PROMPT_VERSION = "v8-response-guide"
 
-CATEGORY_DESCRIPTIONS = (
-    ("age-appropriate", "children, minors, dependent people, vulnerable people, abuse or exploitation risk, and age-appropriate handling"),
-    ("social-bias", "insensitive, racist, sexist, hateful, demeaning, harassing, or socially inappropriate content"),
-    ("criminal-activity", "violence, theft, hacking, robbery, evasion, unauthorized access, or other criminal plans"),
-    ("harmful-general", "broad harmful, unethical, toxic, dangerous, or illegal content that does not fit a narrower category"),
-    ("baiting", "requests that try to elicit harmful content, jailbreak behavior, or unsafe compliance"),
-    ("dangerous-advice", "legally questionable, physically dangerous, or risk-increasing advice"),
-    ("empathy-support", "self-harm, abuse, acute distress, crisis support, emotional support, and empathetic response quality"),
-    ("gender-bias", "misogyny, sexism, sexual degradation, or gender-biased content"),
-    ("harmful-assumptions", "harmful assumptions in the user request or assistant response that should be challenged or corrected"),
-    ("moral-standards", "commonsense ethical or moral objectionability that does not fit a narrower category"),
-    ("privacy-consent", "privacy, consent, personal data, tracking, impersonation, credentials, or bypassing privacy protections"),
-    ("deception-manipulation", "fraud, impersonation, coercion, exploitation, manipulation, or bad-faith persuasion"),
-    ("high-impact-advice", "medical, legal, financial, or similarly high-impact advice where uncertainty and professional judgment matter"),
-    ("preserve-helpfulness", "over-refusal, safe alternatives, answering benign parts, and preserving helpfulness within safety limits"),
-)
-
-KNOWN_CATEGORIES = tuple(category for category, _ in CATEGORY_DESCRIPTIONS)
-COMPILER_RESPONSE_SCHEMA: dict[str, object] = {
+GUIDE_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "rules": {
+        "title": {"type": "string", "minLength": 1},
+        "overview": {"type": "string", "minLength": 1},
+        "response_posture": {"type": "string", "minLength": 1},
+        "sections": {
             "type": "array",
             "minItems": 1,
             "items": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
-                    "category": {"type": "string", "enum": list(KNOWN_CATEGORIES)},
-                    "principle": {"type": "string", "minLength": 1},
-                    "critic": {"type": "string", "minLength": 1},
-                    "revision": {"type": "string", "minLength": 1},
+                    "title": {"type": "string", "minLength": 1},
+                    "when_to_apply": {"type": "string", "minLength": 1},
+                    "do": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                    "avoid": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                    "examples": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "user": {"type": "string", "minLength": 1},
+                                "good": {"type": "string", "minLength": 1},
+                                "bad": {"type": "string", "minLength": 1},
+                                "notes": {"type": "string", "minLength": 1},
+                            },
+                            "required": list(GUIDE_EXAMPLE_FIELDS),
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": list(RULE_FIELDS),
+                "required": list(GUIDE_SECTION_FIELDS),
                 "additionalProperties": False,
             },
-        }
+        },
     },
-    "required": ["rules"],
+    "required": ["title", "overview", "response_posture", "sections"],
     "additionalProperties": False,
 }
 
 
 class ConstitutionError(ValueError):
-    """Raised when a constitution or ruleset cannot be compiled or validated."""
-
-
-class LiteralString(str):
-    """String that should be emitted as a YAML literal block."""
-
-
-class RulesetDumper(yaml.SafeDumper):
-    """YAML dumper with indentation tuned for hand-edited files."""
-
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
-        return super().increase_indent(flow, False)
-
-
-def _literal_string_representer(dumper: yaml.SafeDumper, value: LiteralString) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|")
-
-
-RulesetDumper.add_representer(LiteralString, _literal_string_representer)
+    """Raised when a constitution or response guide cannot be compiled or validated."""
 
 
 def compile_markdown(
@@ -98,8 +79,8 @@ def compile_markdown(
     temperature: float = 0.0,
     max_tokens: int = 32000,
     reasoning: Mapping[str, object] | None = COMPILER_REASONING,
-) -> list[dict[str, str]]:
-    """Compile a complete Markdown constitution through an OpenRouter model."""
+) -> dict[str, object]:
+    """Compile a complete Markdown constitution into structured response-guide data."""
 
     if not markdown.strip():
         raise ConstitutionError("constitution Markdown is empty")
@@ -112,10 +93,10 @@ def compile_markdown(
         response_format=compiler_response_format(),
         reasoning=reasoning,
     )
-    return ruleset_from_json(response)
+    return guide_from_json(response)
 
 
-def ruleset_from_json(text: str) -> list[dict[str, str]]:
+def guide_from_json(text: str) -> dict[str, object]:
     """Parse and validate compiler JSON output."""
 
     try:
@@ -123,44 +104,103 @@ def ruleset_from_json(text: str) -> list[dict[str, str]]:
     except json.JSONDecodeError as exc:
         raise ConstitutionError(f"compiler returned invalid JSON: {exc}") from exc
 
-    if not isinstance(payload, dict):
-        raise ConstitutionError("compiler JSON must be an object")
-
-    raw_rules = payload.get("rules")
-    if not isinstance(raw_rules, list):
-        raise ConstitutionError("compiler JSON must contain a rules array")
-
-    rules: list[dict[str, str]] = []
-    for index, raw_rule in enumerate(raw_rules, start=1):
-        rules.append(_validate_rule(raw_rule, index))
-
-    if not rules:
-        raise ConstitutionError("rules array must not be empty")
-
-    _ensure_unique("rule id", (rule["id"] for rule in rules))
-    return rules
+    return validate_guide_data(payload)
 
 
-def ruleset_to_yaml(rules: list[dict[str, str]]) -> str:
-    """Serialize rules as reviewer-friendly YAML."""
+def validate_guide_data(payload: object) -> dict[str, object]:
+    """Validate structured response-guide data."""
 
-    yaml_rules = [
-        {
-            "id": rule["id"],
-            "category": rule["category"],
-            "principle": rule["principle"],
-            "critic": LiteralString(rule["critic"]),
-            "revision": LiteralString(rule["revision"]),
-        }
-        for rule in rules
+    if not isinstance(payload, Mapping):
+        raise ConstitutionError("guide JSON must be an object")
+
+    keys = set(payload)
+    expected = {"title", "overview", "response_posture", "sections"}
+    missing = expected - keys
+    extra = keys - expected
+    if missing:
+        raise ConstitutionError(f"guide JSON missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise ConstitutionError(f"guide JSON unexpected fields: {', '.join(sorted(extra))}")
+
+    guide: dict[str, object] = {
+        "title": _non_empty_string(payload["title"], "title"),
+        "overview": _non_empty_string(payload["overview"], "overview"),
+        "response_posture": _non_empty_string(payload["response_posture"], "response_posture"),
+    }
+
+    raw_sections = payload["sections"]
+    if not isinstance(raw_sections, list) or not raw_sections:
+        raise ConstitutionError("guide sections must be a non-empty array")
+    sections = [_validate_section(section, index) for index, section in enumerate(raw_sections, start=1)]
+    _ensure_unique("section id", (str(section["id"]) for section in sections))
+    guide["sections"] = sections
+    return guide
+
+
+def guide_to_markdown(guide: Mapping[str, object]) -> str:
+    """Serialize guide data as human-editable Markdown."""
+
+    data = validate_guide_data(guide)
+    lines = [
+        f"# {data['title']}",
+        "",
+        "<!-- Generated response guide. Edit this Markdown directly before generating data. -->",
+        "",
+        "## Overview",
+        "",
+        str(data["overview"]),
+        "",
+        "## Response Posture",
+        "",
+        str(data["response_posture"]),
+        "",
+        "## Guide Sections",
+        "",
     ]
-    return yaml.dump(
-        yaml_rules,
-        Dumper=RulesetDumper,
-        sort_keys=False,
-        allow_unicode=True,
-        width=1000,
-    )
+
+    for section in data["sections"]:  # type: ignore[index]
+        section_map = section if isinstance(section, Mapping) else {}
+        lines.extend(
+            [
+                f"### {section_map['id']}: {section_map['title']}",
+                "",
+                "**When to apply:**",
+                "",
+                str(section_map["when_to_apply"]),
+                "",
+                "**Do:**",
+                "",
+            ]
+        )
+        lines.extend(f"- {item}" for item in section_map["do"])  # type: ignore[index]
+        lines.extend(["", "**Avoid:**", ""])
+        lines.extend(f"- {item}" for item in section_map["avoid"])  # type: ignore[index]
+        lines.extend(["", "**Examples:**", ""])
+        for example in section_map["examples"]:  # type: ignore[index]
+            example_map = example if isinstance(example, Mapping) else {}
+            lines.extend(
+                [
+                    f"- User: {example_map['user']}",
+                    f"  - Good: {example_map['good']}",
+                    f"  - Bad: {example_map['bad']}",
+                    f"  - Notes: {example_map['notes']}",
+                ]
+            )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def validate_markdown(path: str | Path) -> list[str]:
+    """Validate source or guide Markdown."""
+
+    content = Path(path).read_text(encoding="utf-8")
+    if not content.strip():
+        raise ConstitutionError("Markdown is empty")
+    warnings: list[str] = []
+    if not _find_title(content):
+        warnings.append("Markdown has no top-level title")
+    return warnings
 
 
 def compiler_response_format() -> dict[str, object]:
@@ -169,101 +209,69 @@ def compiler_response_format() -> dict[str, object]:
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "constitution_ruleset",
+            "name": "response_guide",
             "strict": True,
-            "schema": COMPILER_RESPONSE_SCHEMA,
+            "schema": GUIDE_RESPONSE_SCHEMA,
         },
     }
 
 
-def validate_markdown(path: str | Path) -> list[str]:
-    """Validate source Markdown without compiling it."""
-
-    content = Path(path).read_text(encoding="utf-8")
-    if not content.strip():
-        raise ConstitutionError("constitution Markdown is empty")
-    warnings: list[str] = []
-    if not _find_title(content):
-        warnings.append("source Markdown has no top-level title")
-    return warnings
-
-
-def validate_ruleset(path: str | Path) -> list[str]:
-    """Validate a generated YAML ruleset."""
-
-    try:
-        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ConstitutionError(f"invalid YAML ruleset: {exc}") from exc
-
-    if not isinstance(payload, list):
-        raise ConstitutionError("ruleset YAML must be a top-level array")
-
-    rules = [_validate_rule(rule, index) for index, rule in enumerate(payload, start=1)]
-    if not rules:
-        raise ConstitutionError("ruleset YAML must contain at least one rule")
-    _ensure_unique("rule id", (rule["id"] for rule in rules))
-    return []
-
-
 def _compiler_messages(markdown: str) -> list[dict[str, str]]:
-    categories = "\n".join(f"- {category}: {description}" for category, description in CATEGORY_DESCRIPTIONS)
     return [
         {
             "role": "system",
             "content": (
-                "You are a rigorous source-faithful policy compiler. "
-                "You turn freeform source documents into crisp executable critique/revision rules without importing unstated policy assumptions. "
-                "Return only valid JSON. Do not wrap the JSON in Markdown."
+                "You are a rigorous source-faithful response-guide compiler. "
+                "You turn freeform constitution documents into practical Markdown guides a human reviewer could use to judge and rewrite assistant responses. "
+                "Return only valid JSON matching the requested schema."
             ),
         },
         {
             "role": "user",
             "content": f"""Compiler prompt version: {COMPILER_PROMPT_VERSION}
 
-Transform the full Markdown constitution below into a JSON object with this exact shape:
+Transform the full Markdown constitution below into a response guide.
+
+Objective:
+- Produce a complete operational guide for data generation and review.
+- The guide must cover the constitution's critical alignment areas as a whole, not isolated random rules.
+- Preserve the source constitution's actual posture. Do not make a strict constitution permissive, a permissive constitution strict, or a playful constitution generic.
+- Make the guide useful to a human reviewer: crisp applicability criteria, concrete do/avoid instructions, and examples.
+
+Return a JSON object with this shape:
 
 {{
-  "rules": [
+  "title": "Short guide title",
+  "overview": "The constitution's purpose and boundaries.",
+  "response_posture": "How the assistant should generally behave under this constitution.",
+  "sections": [
     {{
-      "id": "principle-01-category-name",
-      "category": "category-name",
-      "principle": "Human-readable principle copied or lightly normalized from the source.",
-      "critic": "Prompt for critiquing an assistant response against this principle.",
-      "revision": "Prompt for revising an assistant response against this principle."
+      "id": "stable-lower-kebab-id",
+      "title": "Section title",
+      "when_to_apply": "Observable conditions for when this section matters.",
+      "do": ["Concrete response behavior to follow."],
+      "avoid": ["Concrete response behavior to avoid."],
+      "examples": [
+        {{
+          "user": "A representative user request.",
+          "good": "A concise response that follows the guide.",
+          "bad": "A concise response that violates the guide.",
+          "notes": "Why the good response is better."
+        }}
+      ]
     }}
   ]
 }}
 
-Rules:
-- Extract the author's intended principles from the entire Markdown document.
-- Preserve meaning; do not invent unrelated principles.
-- Treat the source Markdown as authoritative. Do not assume the constitution is strict, balanced, permissive, safety-focused, humor-focused, or helpfulness-focused unless the source says so.
-- Identify the source constitution's top-level objective first. Every rule must serve that objective. Do not produce a longer or broader rule list if that weakens the objective.
-- Use one rule per distinct principle.
-- Use stable lower-kebab-case ids.
-- Use these categories when possible:
-{categories}
-- If no category fits, use "moral-standards".
-- Use categories only as routing labels for the rules. Do not add category-specific obligations that are not present in the source.
-- Every rule must contain exactly: id, category, principle, critic, revision.
+Requirements:
+- Use 4 to 10 guide sections unless the source clearly requires fewer or more.
+- Every section id must be stable lower-kebab-case.
+- Each section must express a distinct, reusable alignment concern.
+- Sections must be broad enough to apply across many prompts but specific enough to support concrete judgments.
+- Include examples that test the constitution's differentiating behavior, especially strict vs balanced vs permissive vs playful posture when relevant.
+- Do not add generic safety obligations unless they are grounded in the source.
+- Do not produce critique/revision prompt snippets. Produce a guide, not a random-rule set.
 - Return JSON only.
-
-Crispness requirements:
-- Keep each rule narrow enough to produce a meaningfully different critique/revision from the other rules.
-- If one source bullet contains multiple independent obligations, split it into multiple rules. If the obligations share one behavioral test, keep them together.
-- The principle should be a short, plain-language statement of the rule. Prefer one sentence.
-- The critic must be an observable test for the assistant response. It must state when the rule applies, when it does not apply, what concrete behavior counts as a violation, and what offending content or missing behavior to identify.
-- The critic must make it easy for a later model to return revision_needed=false when the rule is irrelevant or already satisfied. Do not write critic prompts that imply every response needs a revision.
-- The revision must be minimal and targeted. It must say what to remove, what to preserve, and what safe alternative, redirect, correction, or next step to provide when relevant.
-- The revision must preserve the original answer unless specific content violates the rule. Do not add unrelated safety warnings, crisis language, privacy language, moral framing, or tone changes.
-- Avoid mushy wording such as "be appropriate", "use care", "ensure safety", or "follow the principle" unless paired with concrete criteria.
-- Use concrete verbs such as identify, remove, replace, preserve, redirect, correct, refuse, answer, recommend, or ask.
-- Preserve requested style from the source, such as humor or light wit, only when it does not undermine safety or dignity.
-- Preserve the source constitution's risk posture. Strict constitutions should refuse explicit harmful requests directly, clarify only genuinely ambiguous risky requests, and flag borderline enablement or missing safeguards. Balanced constitutions should balance useful answers with safety limits. Permissive constitutions should flag over-refusal and preserve as much benign, educational, fictional, analytical, or defensive detail as possible while still removing actionable harm. Playful constitutions should apply humor only when the relevant harmful, criminal, or socially inappropriate framing is actually present.
-- Do not flatten strict, balanced, and permissive constitutions into the same generic safety behavior.
-- If the source is not a safety constitution, do not transform it into one. Produce rules that faithfully express the source's actual goals.
-- Do not add broad generic safety rules that are not grounded in the source Markdown.
 
 Markdown constitution:
 ```markdown
@@ -273,32 +281,65 @@ Markdown constitution:
     ]
 
 
-def _validate_rule(raw_rule: object, index: int) -> dict[str, str]:
-    if not isinstance(raw_rule, Mapping):
-        raise ConstitutionError(f"rule {index}: must be an object")
+def _validate_section(raw_section: object, index: int) -> dict[str, object]:
+    if not isinstance(raw_section, Mapping):
+        raise ConstitutionError(f"section {index}: must be an object")
 
-    keys = set(raw_rule)
-    expected = set(RULE_FIELDS)
+    keys = set(raw_section)
+    expected = set(GUIDE_SECTION_FIELDS)
     missing = expected - keys
     extra = keys - expected
     if missing:
-        raise ConstitutionError(f"rule {index}: missing fields: {', '.join(sorted(missing))}")
+        raise ConstitutionError(f"section {index}: missing fields: {', '.join(sorted(missing))}")
     if extra:
-        raise ConstitutionError(f"rule {index}: unexpected fields: {', '.join(sorted(extra))}")
+        raise ConstitutionError(f"section {index}: unexpected fields: {', '.join(sorted(extra))}")
 
-    rule: dict[str, str] = {}
-    for field in RULE_FIELDS:
-        value = raw_rule[field]
-        if not isinstance(value, str) or not value.strip():
-            raise ConstitutionError(f"rule {index}: {field} must be a non-empty string")
-        rule[field] = value.strip()
+    section = {
+        "id": _non_empty_string(raw_section["id"], f"section {index} id"),
+        "title": _non_empty_string(raw_section["title"], f"section {index} title"),
+        "when_to_apply": _non_empty_string(raw_section["when_to_apply"], f"section {index} when_to_apply"),
+        "do": _string_list(raw_section["do"], f"section {index} do"),
+        "avoid": _string_list(raw_section["avoid"], f"section {index} avoid"),
+    }
+    if not GUIDE_ID.match(str(section["id"])):
+        raise ConstitutionError(f"section {index}: id must be lower-kebab-case")
 
-    if not RULE_ID.match(rule["id"]):
-        raise ConstitutionError(f"rule {index}: id must be lower-kebab-case")
-    if rule["category"] not in KNOWN_CATEGORIES:
-        raise ConstitutionError(f"rule {index}: unknown category {rule['category']!r}")
+    raw_examples = raw_section["examples"]
+    if not isinstance(raw_examples, list) or not raw_examples:
+        raise ConstitutionError(f"section {index}: examples must be a non-empty array")
+    section["examples"] = [_validate_example(example, index, example_index) for example_index, example in enumerate(raw_examples, start=1)]
+    return section
 
-    return rule
+
+def _validate_example(raw_example: object, section_index: int, example_index: int) -> dict[str, str]:
+    if not isinstance(raw_example, Mapping):
+        raise ConstitutionError(f"section {section_index} example {example_index}: must be an object")
+
+    keys = set(raw_example)
+    expected = set(GUIDE_EXAMPLE_FIELDS)
+    missing = expected - keys
+    extra = keys - expected
+    if missing:
+        raise ConstitutionError(f"section {section_index} example {example_index}: missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise ConstitutionError(f"section {section_index} example {example_index}: unexpected fields: {', '.join(sorted(extra))}")
+
+    return {
+        field: _non_empty_string(raw_example[field], f"section {section_index} example {example_index} {field}")
+        for field in GUIDE_EXAMPLE_FIELDS
+    }
+
+
+def _non_empty_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConstitutionError(f"{label} must be a non-empty string")
+    return value.strip()
+
+
+def _string_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ConstitutionError(f"{label} must be a non-empty array")
+    return [_non_empty_string(item, f"{label} item {index}") for index, item in enumerate(value, start=1)]
 
 
 def _find_title(markdown: str) -> str | None:
@@ -311,20 +352,17 @@ def _find_title(markdown: str) -> str | None:
 def _ensure_unique(label: str, values: Iterable[str]) -> None:
     seen: set[str] = set()
     duplicates: set[str] = set()
-
     for value in values:
         if value in seen:
             duplicates.add(value)
         seen.add(value)
-
     if duplicates:
-        joined = ", ".join(sorted(duplicates))
-        raise ConstitutionError(f"duplicate {label}: {joined}")
+        raise ConstitutionError(f"duplicate {label}: {', '.join(sorted(duplicates))}")
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     try:
-        warnings = validate_ruleset(args.path) if args.path.suffix in {".yaml", ".yml"} else validate_markdown(args.path)
+        warnings = validate_markdown(args.path)
     except ConstitutionError as exc:
         print(f"invalid: {exc}", file=sys.stderr)
         return 1
@@ -332,7 +370,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"valid: {args.path}")
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
-
     return 0
 
 
@@ -340,7 +377,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     try:
         markdown = args.path.read_text(encoding="utf-8")
         client = OpenRouterClient(settings_from_env(args.env))
-        rules = compile_markdown(
+        guide = compile_markdown(
             markdown,
             client,
             model=args.model,
@@ -352,7 +389,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
         print(f"invalid: {exc}", file=sys.stderr)
         return 1
 
-    text = ruleset_to_yaml(rules)
+    text = guide_to_markdown(guide)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(text, encoding="utf-8")
@@ -365,11 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Constitution helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    validate = subparsers.add_parser("validate", help="validate source Markdown or ruleset YAML")
+    validate = subparsers.add_parser("validate", help="validate source or response-guide Markdown")
     validate.add_argument("path", type=Path)
     validate.set_defaults(func=_cmd_validate)
 
-    compile_parser = subparsers.add_parser("compile", help="compile Markdown to editable ruleset YAML")
+    compile_parser = subparsers.add_parser("compile", help="compile constitution Markdown to response-guide Markdown")
     compile_parser.add_argument("path", type=Path)
     compile_parser.add_argument("-o", "--output", type=Path)
     compile_parser.add_argument("--env", type=Path, default=Path(".env"))
@@ -381,7 +418,6 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning.add_argument("--reasoning-max-tokens", type=int)
     compile_parser.add_argument("--include-reasoning", action="store_true")
     compile_parser.set_defaults(func=_cmd_compile)
-
     return parser
 
 

@@ -4,11 +4,11 @@ import tempfile
 import unittest
 
 from cai.openrouter import (
-    APPLY_RULES_MODEL,
-    APPLY_RULES_REASONING,
     COMPILER_MODEL,
     COMPILER_REASONING,
     DEFAULT_CHAT_MODEL,
+    GUIDE_APPLICATION_MODEL,
+    GUIDE_APPLICATION_REASONING,
     OpenRouterClient,
     OpenRouterError,
     OpenRouterSettings,
@@ -55,10 +55,10 @@ class OpenRouterTests(unittest.TestCase):
 
     def test_model_roles_are_code_defaults_not_env_settings(self) -> None:
         self.assertEqual(COMPILER_MODEL, "deepseek/deepseek-v4-pro")
-        self.assertEqual(APPLY_RULES_MODEL, "deepseek/deepseek-v4-flash")
-        self.assertEqual(DEFAULT_CHAT_MODEL, APPLY_RULES_MODEL)
+        self.assertEqual(GUIDE_APPLICATION_MODEL, "deepseek/deepseek-v4-flash")
+        self.assertEqual(DEFAULT_CHAT_MODEL, GUIDE_APPLICATION_MODEL)
         self.assertEqual(COMPILER_REASONING, {"effort": "high", "exclude": True})
-        self.assertEqual(APPLY_RULES_REASONING, {"effort": "medium", "exclude": True})
+        self.assertEqual(GUIDE_APPLICATION_REASONING, {"effort": "medium", "exclude": True})
 
     def test_chat_includes_reasoning_when_provided(self) -> None:
         client = FakeOpenRouterClient()

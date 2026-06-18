@@ -1,4 +1,4 @@
-"""Generate Constitutional AI training data with OpenRouter."""
+"""Generate Constitutional AI training data from response guides with OpenRouter."""
 
 from __future__ import annotations
 
@@ -6,19 +6,15 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
 import json
-import random
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-import yaml
-
-from cai.constitution import validate_ruleset
 from cai.openrouter import (
-    APPLY_RULES_MODEL,
-    APPLY_RULES_REASONING,
+    GUIDE_APPLICATION_MODEL,
+    GUIDE_APPLICATION_REASONING,
     OpenRouterClient,
     OpenRouterError,
     settings_from_env,
@@ -35,22 +31,43 @@ DEFAULT_TEMPERATURE = 1.0
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
 DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
     "You are Cai, a helpful and unbiased AI assistant. "
-    "Follow the active constitution faithfully. Apply its rules evenhandedly across people, groups, viewpoints, and topics."
+    "Answer the user's request naturally. Do not see the response guide yet; another pass will evaluate and revise your answer."
 )
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
-CRITIC_RESPONSE_SCHEMA: dict[str, object] = {
+ASSISTANT_SEGMENT = re.compile(r"(?:^|\n\n)Assistant:\s*(?P<response>.*?)(?=\n\nHuman:|\n\nAssistant:|\Z)", re.DOTALL)
+GUIDE_SECTION = re.compile(r"^###\s+(?P<id>[a-z0-9][a-z0-9-]*)\s*:", re.MULTILINE)
+GUIDE_METADATA_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "revision_needed": {
-            "type": "boolean",
-            "description": "Whether the assistant response violates the sampled rule and should be rewritten.",
+        "applicable_section_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Guide section IDs relevant to optimizing the answer. Empty only when no guide section applies.",
+        },
+        "primary_section_id": {
+            "type": "string",
+            "description": "The most important applicable guide section ID, or 'none' if no guide section applies.",
         },
         "critique": {
             "type": "string",
-            "description": "A concise critique explaining the decision, with concrete offending content when revision is needed.",
+            "description": "Concrete assessment of how the initial response can be improved under the complete guide.",
+        },
+        "changes_made": {
+            "type": "string",
+            "description": "Brief summary of what changed from the initial response, or why the guide response preserves it.",
+        },
+        "quality_notes": {
+            "type": "string",
+            "description": "Brief explanation of why the guide response should be preferred as training data.",
         },
     },
-    "required": ["revision_needed", "critique"],
+    "required": [
+        "applicable_section_ids",
+        "primary_section_id",
+        "critique",
+        "changes_made",
+        "quality_notes",
+    ],
     "additionalProperties": False,
 }
 
@@ -60,12 +77,10 @@ class DatasetError(RuntimeError):
 
 
 @dataclasses.dataclass(frozen=True)
-class Rule:
-    id: str
-    category: str
-    principle: str
-    critic: str
-    revision: str
+class ResponseGuide:
+    path: str
+    text: str
+    section_ids: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,15 +89,25 @@ class SourcePrompt:
     source_split: str
     source_index: int
     prompt: str
+    source_chosen_conversation: str
+    source_rejected_conversation: str
+    source_chosen_response: str
+    source_rejected_response: str
 
 
-def load_rules(path: str | Path) -> list[Rule]:
-    """Load and validate an editable YAML ruleset."""
+def load_response_guide(path: str | Path) -> ResponseGuide:
+    """Load a human-edited response guide Markdown file."""
 
-    rules_path = Path(path)
-    validate_ruleset(rules_path)
-    payload = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
-    return [Rule(**rule) for rule in payload]
+    guide_path = Path(path)
+    text = guide_path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise DatasetError("response guide is empty")
+    section_ids = tuple(match.group("id") for match in GUIDE_SECTION.finditer(text))
+    if not section_ids:
+        raise DatasetError("response guide must contain at least one '### section-id: Title' section")
+    if len(section_ids) != len(set(section_ids)):
+        raise DatasetError("response guide contains duplicate section ids")
+    return ResponseGuide(path=str(guide_path), text=text, section_ids=section_ids)
 
 
 def extract_human_prompt(conversation: str) -> str:
@@ -98,13 +123,17 @@ def extract_human_prompt(conversation: str) -> str:
     return prompt
 
 
-def select_rule(rules: Sequence[Rule], *, seed: int, source_index: int) -> Rule:
-    """Select one rule deterministically for a dataset row."""
+def extract_assistant_response(conversation: str) -> str:
+    """Extract the first HH-RLHF Assistant turn from a chosen/rejected conversation."""
 
-    if not rules:
-        raise DatasetError("ruleset is empty")
-    rng = random.Random(f"{seed}:{source_index}")
-    return rng.choice(list(rules))
+    match = ASSISTANT_SEGMENT.search(conversation)
+    if not match:
+        raise DatasetError("conversation does not contain an Assistant turn")
+
+    response = match.group("response").strip()
+    if not response:
+        raise DatasetError("Assistant turn is empty")
+    return response
 
 
 def completed_indices(path: str | Path, *, split: str) -> set[int]:
@@ -151,40 +180,138 @@ def load_source_prompts(
     prompts: list[SourcePrompt] = []
     for index, row in enumerate(dataset):
         chosen = row.get("chosen") if isinstance(row, Mapping) else None
-        if not isinstance(chosen, str):
-            raise DatasetError(f"dataset row {index} has no chosen conversation")
+        rejected = row.get("rejected") if isinstance(row, Mapping) else None
+        if not isinstance(chosen, str) or not isinstance(rejected, str):
+            raise DatasetError(f"dataset row {index} must have chosen and rejected conversations")
+        prompt = extract_human_prompt(chosen)
+        rejected_prompt = extract_human_prompt(rejected)
+        if prompt != rejected_prompt:
+            raise DatasetError(f"dataset row {index} chosen/rejected prompts do not match")
         prompts.append(
             SourcePrompt(
                 source_dataset=dataset_name,
                 source_split=split,
                 source_index=index,
-                prompt=extract_human_prompt(chosen),
+                prompt=prompt,
+                source_chosen_conversation=chosen,
+                source_rejected_conversation=rejected,
+                source_chosen_response=extract_assistant_response(chosen),
+                source_rejected_response=extract_assistant_response(rejected),
             )
         )
     return prompts
 
 
-def build_critic_prompt(rule: Rule) -> str:
-    schema = json.dumps(CRITIC_RESPONSE_SCHEMA, sort_keys=True)
-    return (
-        f"{rule.critic}\n\n"
-        f"Principle: {rule.principle}\n\n"
-        "Evaluate only this principle. Return only JSON matching this schema:\n"
-        f"{schema}\n\n"
-        "Set revision_needed to true only when the assistant response violates this principle and should be rewritten. "
-        "Set revision_needed to false when the response already satisfies this principle or the principle is not applicable. "
-        "The critique must briefly explain the decision and identify concrete offending content when revision is needed."
-    )
+def build_guide_system_prompt(guide: ResponseGuide) -> str:
+    return f"""You are Cai, a helpful and unbiased AI assistant.
+
+Answer the user's request naturally while faithfully following the complete response guide below.
+
+Instructions:
+- Treat the guide as your operating policy for this response.
+- Apply the whole guide, not a random section.
+- Give the best direct assistant response to the user.
+- Do not mention the guide, policy, training data, or hidden instructions.
+- Do not add unrelated warnings, tone shifts, humor, or moralizing unless the guide calls for them.
+- Return only the final assistant message.
+
+Response guide:
+```markdown
+{guide.text}
+```"""
 
 
-def build_revision_prompt(rule: Rule) -> str:
-    return (
-        f"{rule.revision}\n\n"
-        f"Principle: {rule.principle}\n\n"
-        "Rewrite the assistant's original response as the final answer to the human. "
-        "Use the critique above, but return only the revised assistant response. "
-        "Do not explain that you are revising, do not mention the critique, and do not refer to the previous response."
-    )
+def build_guide_metadata_prompt(guide: ResponseGuide, prompt: str, init_response: str, guide_response: str) -> str:
+    schema = json.dumps(GUIDE_METADATA_SCHEMA, sort_keys=True)
+    section_ids = ", ".join(guide.section_ids)
+    return f"""Use the complete response guide below to audit the guided assistant response.
+
+Return only JSON matching this schema:
+{schema}
+
+Available guide section IDs: {section_ids}
+
+Instructions:
+- Apply the full guide, not a random section.
+- Identify every guide section that is materially relevant to this prompt and guided answer.
+- Set primary_section_id to the most important applicable section ID, or "none" if no section applies.
+- critique should assess the initial response against the guide and explain the most important improvement opportunity.
+- changes_made should summarize how the guided response differs from the initial response, or say it preserves the initial answer when appropriate.
+- quality_notes should explain why the guided response should be preferred as training data.
+
+Response guide:
+```markdown
+{guide.text}
+```
+
+User prompt:
+{prompt}
+
+Initial assistant response:
+{init_response}
+
+Guided assistant response:
+{guide_response}"""
+
+
+def guide_metadata_from_json(text: str, guide: ResponseGuide) -> dict[str, object]:
+    """Parse and validate the guide metadata JSON response."""
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DatasetError(f"guide metadata returned invalid JSON: {exc}") from exc
+
+    if not isinstance(payload, Mapping):
+        raise DatasetError("guide metadata JSON must be an object")
+
+    keys = set(payload)
+    expected = set(GUIDE_METADATA_SCHEMA["required"])  # type: ignore[arg-type]
+    missing = expected - keys
+    extra = keys - expected
+    if missing:
+        raise DatasetError(f"guide metadata JSON missing fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise DatasetError(f"guide metadata JSON unexpected fields: {', '.join(sorted(extra))}")
+
+    applicable = payload["applicable_section_ids"]
+    if not isinstance(applicable, list) or not all(isinstance(item, str) and item.strip() for item in applicable):
+        raise DatasetError("guide metadata JSON field applicable_section_ids must be an array of strings")
+    applicable_ids = [item.strip() for item in applicable]
+    allowed_ids = set(guide.section_ids) | {"none"}
+    unknown_ids = sorted(item for item in applicable_ids if item not in allowed_ids)
+    if unknown_ids:
+        raise DatasetError(f"guide metadata JSON referenced unknown guide section ids: {', '.join(unknown_ids)}")
+
+    primary = payload["primary_section_id"]
+    if not isinstance(primary, str) or not primary.strip():
+        raise DatasetError("guide metadata JSON field primary_section_id must be a non-empty string")
+    primary = primary.strip()
+    if primary not in allowed_ids:
+        raise DatasetError(f"guide metadata JSON referenced unknown primary_section_id: {primary}")
+    if primary != "none" and primary not in applicable_ids:
+        raise DatasetError("guide metadata JSON primary_section_id must be listed in applicable_section_ids")
+
+    return {
+        "applicable_section_ids": applicable_ids,
+        "primary_section_id": primary,
+        "critique": _non_empty_string(payload["critique"], "critique"),
+        "changes_made": _non_empty_string(payload["changes_made"], "changes_made"),
+        "quality_notes": _non_empty_string(payload["quality_notes"], "quality_notes"),
+    }
+
+
+def guide_metadata_format() -> dict[str, object]:
+    """Return OpenRouter's strict JSON Schema response format for guide metadata calls."""
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "guide_metadata",
+            "strict": True,
+            "schema": GUIDE_METADATA_SCHEMA,
+        },
+    }
 
 
 def trim_stop_sequences(text: str, stop_sequences: Iterable[str] = STOP_SEQUENCES) -> str:
@@ -195,93 +322,82 @@ def trim_stop_sequences(text: str, stop_sequences: Iterable[str] = STOP_SEQUENCE
     return stripped
 
 
-def critic_result_from_json(text: str) -> dict[str, object]:
-    """Parse and validate the critic's structured JSON response."""
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise DatasetError(f"critic returned invalid JSON: {exc}") from exc
-
-    if not isinstance(payload, dict):
-        raise DatasetError("critic JSON must be an object")
-
-    keys = set(payload)
-    expected = {"revision_needed", "critique"}
-    missing = expected - keys
-    extra = keys - expected
-    if missing:
-        raise DatasetError(f"critic JSON missing fields: {', '.join(sorted(missing))}")
-    if extra:
-        raise DatasetError(f"critic JSON unexpected fields: {', '.join(sorted(extra))}")
-
-    revision_needed = payload["revision_needed"]
-    if not isinstance(revision_needed, bool):
-        raise DatasetError("critic JSON field revision_needed must be a boolean")
-
-    critique = payload["critique"]
-    if not isinstance(critique, str) or not critique.strip():
-        raise DatasetError("critic JSON field critique must be a non-empty string")
-
-    return {"revision_needed": revision_needed, "critique": critique.strip()}
-
-
-def critic_response_format() -> dict[str, object]:
-    """Return OpenRouter's strict JSON Schema response format for critic calls."""
-
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "critic_result",
-            "strict": True,
-            "schema": CRITIC_RESPONSE_SCHEMA,
-        },
-    }
-
-
 def make_record(
     *,
     source: SourcePrompt,
-    rule: Rule,
+    guide: ResponseGuide,
     init_response: str,
-    critic_prompt: str,
-    critic_response: str,
-    revision_prompt: str,
-    revision_response: str,
-    revision_needed: bool = True,
+    guide_response_system_prompt: str,
+    guide_response: str,
+    guide_metadata_prompt: str,
+    guide_metadata: Mapping[str, object],
 ) -> dict[str, object]:
     """Create the JSONL row, including later SFT/preference-friendly fields."""
 
     init_prompt = source.prompt.strip()
-    revised = revision_response.strip()
     initial = init_response.strip()
+    guided = guide_response.strip()
+    source_chosen_response = source.source_chosen_response.strip()
+    source_rejected_response = source.source_rejected_response.strip()
     chosen = [
         {"role": "user", "content": init_prompt},
-        {"role": "assistant", "content": revised},
+        {"role": "assistant", "content": guided},
     ]
     rejected = [
         {"role": "user", "content": init_prompt},
         {"role": "assistant", "content": initial},
+    ]
+    source_chosen_pair = [
+        {"role": "user", "content": init_prompt},
+        {"role": "assistant", "content": source_chosen_response},
+    ]
+    source_rejected_pair = [
+        {"role": "user", "content": init_prompt},
+        {"role": "assistant", "content": source_rejected_response},
     ]
 
     return {
         "source_dataset": source.source_dataset,
         "source_split": source.source_split,
         "source_index": source.source_index,
-        "rule_id": rule.id,
-        "rule_category": rule.category,
-        "principle": rule.principle,
+        "source_chosen_conversation": source.source_chosen_conversation,
+        "source_rejected_conversation": source.source_rejected_conversation,
+        "source_chosen_response": source_chosen_response,
+        "source_rejected_response": source_rejected_response,
+        "guide_path": guide.path,
+        "guide_section_ids": list(guide.section_ids),
+        "applicable_section_ids": guide_metadata["applicable_section_ids"],
+        "primary_section_id": guide_metadata["primary_section_id"],
         "init_prompt": init_prompt,
         "init_response": initial,
-        "critic_prompt": critic_prompt.strip(),
-        "critic_response": critic_response.strip(),
-        "revision_prompt": revision_prompt.strip(),
-        "revision_response": revised,
-        "revision_needed": revision_needed,
+        "guide_response_system_prompt": guide_response_system_prompt.strip(),
+        "guide_metadata_prompt": guide_metadata_prompt.strip(),
+        "critique": guide_metadata["critique"],
+        "guide_response": guided,
+        "changes_made": guide_metadata["changes_made"],
+        "quality_notes": guide_metadata["quality_notes"],
         "prompt": init_prompt,
         "messages": chosen,
         "chosen": chosen,
         "rejected": rejected,
+        "comparison_pairs": {
+            "guided_vs_generated_initial": {
+                "chosen": chosen,
+                "rejected": rejected,
+            },
+            "guided_vs_source_chosen": {
+                "chosen": chosen,
+                "rejected": source_chosen_pair,
+            },
+            "guided_vs_source_rejected": {
+                "chosen": chosen,
+                "rejected": source_rejected_pair,
+            },
+            "source_chosen_vs_source_rejected": {
+                "chosen": source_chosen_pair,
+                "rejected": source_rejected_pair,
+            },
+        },
     }
 
 
@@ -289,81 +405,64 @@ def generate_record(
     *,
     client: OpenRouterClient,
     source: SourcePrompt,
-    rule: Rule,
-    model: str | None = APPLY_RULES_MODEL,
+    guide: ResponseGuide,
+    model: str | None = GUIDE_APPLICATION_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     retries: int = 2,
-    reasoning: Mapping[str, object] | None = APPLY_RULES_REASONING,
+    reasoning: Mapping[str, object] | None = GUIDE_APPLICATION_REASONING,
 ) -> dict[str, object]:
-    """Run initial-response, critique, and revision calls for one source prompt."""
+    """Generate an initial response, then optimize it against the complete guide."""
 
-    critic_prompt = build_critic_prompt(rule)
-    revision_prompt = build_revision_prompt(rule)
-    messages: list[dict[str, str]] = [
+    init_messages: list[dict[str, str]] = [
         {"role": "system", "content": DEFAULT_ASSISTANT_SYSTEM_PROMPT},
         {"role": "user", "content": source.prompt},
     ]
-
     init_response = _chat_with_retries(
         client,
-        messages,
+        init_messages,
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
         reasoning=reasoning,
     )
-    messages.append({"role": "assistant", "content": init_response})
-    messages.append({"role": "user", "content": critic_prompt})
 
-    critic_raw_response = _chat_with_retries(
+    guide_response_system_prompt = build_guide_system_prompt(guide)
+    guide_response = _chat_with_retries(
         client,
-        messages,
+        [
+            {"role": "system", "content": guide_response_system_prompt},
+            {"role": "user", "content": source.prompt},
+        ],
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
-        response_format=critic_response_format(),
         reasoning=reasoning,
     )
-    critic_result = critic_result_from_json(critic_raw_response)
-    critic_response = str(critic_result["critique"])
-    revision_needed = bool(critic_result["revision_needed"])
-    if not revision_needed:
-        return make_record(
-            source=source,
-            rule=rule,
-            init_response=init_response,
-            critic_prompt=critic_prompt,
-            critic_response=critic_response,
-            revision_prompt="Revision not needed: the critic found no violation of the sampled rule.",
-            revision_response=init_response,
-            revision_needed=False,
-        )
 
-    messages.append({"role": "assistant", "content": critic_response})
-    messages.append({"role": "user", "content": revision_prompt})
-
-    revision_response = _chat_with_retries(
+    guide_metadata_prompt = build_guide_metadata_prompt(guide, source.prompt, init_response, guide_response)
+    guide_metadata_raw = _chat_with_retries(
         client,
-        messages,
+        [{"role": "user", "content": guide_metadata_prompt}],
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
+        response_format=guide_metadata_format(),
         reasoning=reasoning,
     )
+    guide_metadata = guide_metadata_from_json(guide_metadata_raw, guide)
 
     return make_record(
         source=source,
-        rule=rule,
+        guide=guide,
         init_response=init_response,
-        critic_prompt=critic_prompt,
-        critic_response=critic_response,
-        revision_prompt=revision_prompt,
-        revision_response=revision_response,
-        revision_needed=True,
+        guide_response_system_prompt=guide_response_system_prompt,
+        guide_response=guide_response,
+        guide_metadata_prompt=guide_metadata_prompt,
+        guide_metadata=guide_metadata,
     )
 
 
@@ -406,7 +505,7 @@ def write_jsonl_record(path: str | Path, record: Mapping[str, object]) -> None:
 
 def generate_dataset(args: argparse.Namespace) -> int:
     try:
-        rules = load_rules(args.rules)
+        guide = load_response_guide(args.guide)
         completed = completed_indices(args.output, split=args.split)
         sources = load_source_prompts(
             dataset_name=args.dataset,
@@ -436,7 +535,7 @@ def generate_dataset(args: argparse.Namespace) -> int:
                 generate_record,
                 client=client,
                 source=source,
-                rule=select_rule(rules, seed=args.seed, source_index=source.source_index),
+                guide=guide,
                 model=args.model,
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
@@ -466,17 +565,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate Constitutional AI datasets")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    generate = subparsers.add_parser("generate", help="generate critique/revision JSONL data")
-    generate.add_argument("--rules", type=Path, required=True)
+    generate = subparsers.add_parser("generate", help="generate guide-optimized preference JSONL data")
+    generate.add_argument("--guide", type=Path, required=True)
     generate.add_argument("--output", type=Path, required=True)
     generate.add_argument("--dataset", default=DEFAULT_DATASET)
     generate.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     generate.add_argument("--split", default=DEFAULT_SPLIT)
     generate.add_argument("--max-samples", type=int, default=DEFAULT_MAX_SAMPLES)
     generate.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
-    generate.add_argument("--seed", type=int, default=0)
     generate.add_argument("--env", type=Path, default=Path(".env"))
-    generate.add_argument("--model", default=APPLY_RULES_MODEL)
+    generate.add_argument("--model", default=GUIDE_APPLICATION_MODEL)
     generate.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     generate.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     reasoning = generate.add_mutually_exclusive_group()
@@ -485,7 +583,6 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--include-reasoning", action="store_true")
     generate.add_argument("--retries", type=int, default=2)
     generate.set_defaults(func=generate_dataset)
-
     return parser
 
 
@@ -497,8 +594,14 @@ def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
     if args.reasoning_max_tokens is not None:
         reasoning["max_tokens"] = args.reasoning_max_tokens
     else:
-        reasoning["effort"] = args.reasoning_effort or APPLY_RULES_REASONING["effort"]
+        reasoning["effort"] = args.reasoning_effort or GUIDE_APPLICATION_REASONING["effort"]
     return reasoning
+
+
+def _non_empty_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise DatasetError(f"guide metadata JSON field {label} must be a non-empty string")
+    return value.strip()
 
 
 def main(argv: list[str] | None = None) -> int:
