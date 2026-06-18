@@ -98,6 +98,7 @@ class ConstitutionTests(unittest.TestCase):
         text = guide_to_markdown(sample_guide_payload())
 
         self.assertIn("# Local Guide", text)
+        self.assertIn("Edit the source constitution Markdown", text)
         self.assertIn("## Response Posture", text)
         self.assertIn("### privacy-consent: Privacy and consent", text)
         self.assertIn("**When to apply:**", text)

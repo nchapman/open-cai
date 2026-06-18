@@ -58,7 +58,7 @@ local `.env` from `.env.example` and set `OPENROUTER_API_KEY`.
 
 Model roles are code defaults, not `.env` settings. Guide compilation uses
 `deepseek/deepseek-v4-pro` with high reasoning. Dataset generation uses
-`deepseek/deepseek-v4-flash` with medium reasoning. Both CLIs expose `--model`,
+`deepseek/deepseek-v3.2` with reasoning disabled. Both CLIs expose `--model`,
 `--reasoning-effort`, `--reasoning-max-tokens`, and `--max-tokens` overrides for
 experiments.
 
@@ -71,6 +71,16 @@ Try a one-off request with:
 
 ```bash
 uv run cai-openrouter chat "Say this is a test"
+```
+
+The same client can call a local OpenAI-compatible endpoint. For example, with a
+separately managed vLLM server:
+
+```bash
+uv run cai-openrouter chat "Say this is a local test" \
+  --base-url http://127.0.0.1:8080/v1 \
+  --api-key local-token \
+  --model qwen3.5-4b-heretic
 ```
 
 ## Dataset generation
@@ -97,6 +107,40 @@ response against the generated initial response, the original HH-RLHF chosen
 response, the original HH-RLHF rejected response, or the original HH-RLHF pair.
 Re-running the same command resumes by skipping source indices already present in
 the output file.
+
+For local model generation, point the dataset CLI at the local OpenAI-compatible
+server and skip metadata if the server does not support strict JSON schema
+responses:
+
+```bash
+uv run cai-dataset generate \
+  --guide constitutions/guides/balanced.guide.md \
+  --output data/generated/qwen-local-balanced.jsonl \
+  --max-samples 128 \
+  --concurrency 16 \
+  --base-url http://127.0.0.1:8080/v1 \
+  --api-key local-token \
+  --model qwen3.5-4b-heretic \
+  --skip-metadata
+```
+
+To generate target-model rejected responses locally while using a stronger
+OpenRouter teacher for the guided chosen responses, override the initial and
+guide providers separately:
+
+```bash
+uv run cai-dataset generate \
+  --guide constitutions/guides/balanced.guide.md \
+  --output data/generated/qwen-local-deepseek-teacher.jsonl \
+  --max-samples 128 \
+  --concurrency 8 \
+  --init-base-url http://127.0.0.1:8080/v1 \
+  --init-model qwen3.5-4b-heretic \
+  --guide-model deepseek/deepseek-v3.2 \
+  --reasoning-effort none \
+  --skip-metadata \
+  --max-tokens 1800
+```
 
 Run tests with:
 

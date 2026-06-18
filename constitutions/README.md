@@ -48,7 +48,9 @@ read by people and by the data-generation model. It includes:
 - concrete do/avoid guidance
 - examples of good and bad responses
 
-Review and edit the Markdown guide by hand before using it in a pipeline run.
+Review the Markdown guide before using it in a pipeline run. If the generated
+guide needs changes, edit the source constitution Markdown and recompile so the
+guide does not drift from its source.
 
 When changing the compiler prompt or source constitution, keep generated
 comparison versions in `guides/versions/` until the new output is reviewed.

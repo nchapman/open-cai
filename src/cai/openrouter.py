@@ -14,11 +14,11 @@ from typing import Mapping, Sequence
 
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_CHAT_MODEL = "deepseek/deepseek-v3.2"
 COMPILER_MODEL = "deepseek/deepseek-v4-pro"
-GUIDE_APPLICATION_MODEL = "deepseek/deepseek-v4-flash"
+GUIDE_APPLICATION_MODEL = "deepseek/deepseek-v3.2"
 COMPILER_REASONING = {"effort": "high", "exclude": True}
-GUIDE_APPLICATION_REASONING = {"effort": "medium", "exclude": True}
+GUIDE_APPLICATION_REASONING = {"effort": "none", "exclude": True}
 
 
 Message = Mapping[str, str]
@@ -55,17 +55,31 @@ def load_env_file(path: str | Path = ".env") -> None:
             os.environ[key] = value
 
 
-def settings_from_env(env_path: str | Path = ".env") -> OpenRouterSettings:
+def settings_from_env(
+    env_path: str | Path = ".env",
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> OpenRouterSettings:
     """Build OpenRouter settings from environment variables and `.env`."""
 
     load_env_file(env_path)
-    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
+    explicit_base_url = base_url is not None
+    resolved_base_url = (base_url or os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL)).strip().rstrip("/")
+    if api_key is not None:
+        resolved_api_key = api_key.strip()
+    elif explicit_base_url and resolved_base_url != DEFAULT_BASE_URL:
+        resolved_api_key = "local-token"
+    else:
+        resolved_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not resolved_api_key and resolved_base_url == DEFAULT_BASE_URL:
         raise OpenRouterError("OPENROUTER_API_KEY is not set")
+    if not resolved_api_key:
+        resolved_api_key = "local-token"
 
     return OpenRouterSettings(
-        api_key=api_key,
-        base_url=os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/"),
+        api_key=resolved_api_key,
+        base_url=resolved_base_url,
         app_url=os.getenv("APP_URL"),
         app_title=os.getenv("APP_TITLE"),
     )
@@ -133,13 +147,13 @@ class OpenRouterClient:
 
 def _cmd_chat(args: argparse.Namespace) -> int:
     try:
-        client = OpenRouterClient(settings_from_env(args.env))
+        client = OpenRouterClient(settings_from_env(args.env, base_url=args.base_url, api_key=args.api_key))
         content = client.chat(
             [{"role": "user", "content": args.prompt}],
             model=args.model,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
-            reasoning=_reasoning_from_args(args),
+            reasoning=_reasoning_from_args(args, base_url=client.settings.base_url),
         )
     except OpenRouterError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -156,6 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="send one chat prompt through OpenRouter")
     chat.add_argument("prompt")
     chat.add_argument("--env", type=Path, default=Path(".env"))
+    chat.add_argument("--base-url")
+    chat.add_argument("--api-key")
     chat.add_argument("--model")
     chat.add_argument("--temperature", type=float, default=0.7)
     chat.add_argument("--max-tokens", type=int, default=1000)
@@ -167,9 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+def _reasoning_from_args(args: argparse.Namespace, *, base_url: str | None = None) -> dict[str, object] | None:
     if args.reasoning_effort and args.reasoning_max_tokens is not None:
         raise OpenRouterError("use either --reasoning-effort or --reasoning-max-tokens, not both")
+    if _uses_non_openrouter_base_url(base_url) and args.reasoning_max_tokens is None:
+        return None
     if not args.reasoning_effort and args.reasoning_max_tokens is None:
         return None
 
@@ -179,6 +197,11 @@ def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
     else:
         reasoning["max_tokens"] = args.reasoning_max_tokens
     return reasoning
+
+
+def _uses_non_openrouter_base_url(base_url: str | None) -> bool:
+    resolved_base_url = (base_url or "").strip().rstrip("/")
+    return bool(resolved_base_url and resolved_base_url != DEFAULT_BASE_URL)
 
 
 def main(argv: list[str] | None = None) -> int:

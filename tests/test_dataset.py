@@ -115,8 +115,13 @@ class DatasetTests(unittest.TestCase):
     def test_guide_system_prompt_uses_complete_guide(self) -> None:
         prompt = build_guide_system_prompt(sample_guide())
 
-        self.assertIn("Apply the whole guide", prompt)
+        self.assertIn("Runtime framing", prompt)
+        self.assertIn("whether it is strict, balanced, permissive", prompt)
+        self.assertIn("more restrictive or more permissive", prompt)
         self.assertIn("privacy-consent", prompt)
+        self.assertIn("Do not repeat or quote", prompt)
+        self.assertIn("explicit about uncertainty", prompt)
+        self.assertIn("rubric labels", prompt)
         self.assertIn("Return only the final assistant message", prompt)
 
     def test_guide_metadata_prompt_uses_complete_guide_and_responses(self) -> None:
@@ -194,8 +199,8 @@ class DatasetTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(_reasoning_from_args(default_args), {"effort": "medium", "exclude": True})
-        self.assertEqual(_reasoning_from_args(token_budget_args), {"max_tokens": 2048, "exclude": True})
+        self.assertEqual(_reasoning_from_args(default_args, base_url=None), {"effort": "none", "exclude": True})
+        self.assertEqual(_reasoning_from_args(token_budget_args, base_url=None), {"max_tokens": 2048, "exclude": True})
 
     def test_make_record_includes_preference_fields_and_guide_traceability(self) -> None:
         record = make_record(
@@ -214,6 +219,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["guide_section_ids"], ["privacy-consent"])
         self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["changes_made"], "Removed private data and preserved a safe alternative.")
+        self.assertEqual(record["metadata_included"], True)
         self.assertEqual(record["guide_response_system_prompt"], "guide response system prompt")
         self.assertEqual(record["guide_metadata_prompt"], "guide metadata prompt")
         self.assertEqual(record["source_chosen_response"], "source chosen answer")
@@ -245,7 +251,7 @@ class DatasetTests(unittest.TestCase):
         client = FakeClient(["initial answer", "guided answer", json.dumps(sample_guide_metadata_payload())])
         source = sample_source("Unsafe request")
 
-        record = generate_record(client=client, source=source, guide=sample_guide())
+        record = generate_record(init_client=client, guide_client=client, source=source, guide=sample_guide())
 
         self.assertEqual(record["init_response"], "initial answer")
         self.assertEqual(record["guide_response"], "guided answer")
@@ -268,6 +274,83 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(client.calls[0][1]["max_tokens"], 6000)
         self.assertEqual(client.calls[2][1]["response_format"]["type"], "json_schema")
         self.assertEqual(client.calls[2][1]["response_format"]["json_schema"]["name"], "guide_metadata")
+
+    def test_generate_record_can_skip_metadata_for_plain_chat_endpoints(self) -> None:
+        client = FakeClient(["initial answer", "guided answer"])
+        source = sample_source("Unsafe request")
+
+        record = generate_record(
+            init_client=client,
+            guide_client=client,
+            source=source,
+            guide=sample_guide(),
+            include_metadata=False,
+        )
+
+        self.assertEqual(record["init_response"], "initial answer")
+        self.assertEqual(record["guide_response"], "guided answer")
+        self.assertEqual(record["metadata_included"], False)
+        self.assertEqual(record["applicable_section_ids"], [])
+        self.assertEqual(record["primary_section_id"], "none")
+        self.assertIsNone(record["critique"])
+        self.assertEqual(record["guide_metadata_prompt"], "")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_local_base_url_disables_default_reasoning_payload(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "generate",
+                "--guide",
+                "guide.md",
+                "--output",
+                "out.jsonl",
+                "--base-url",
+                "http://127.0.0.1:8080/v1",
+            ]
+        )
+
+        self.assertIsNone(_reasoning_from_args(args, base_url=args.base_url))
+
+    def test_split_model_args_keep_local_initial_plain_and_openrouter_guide_reasoning(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "generate",
+                "--guide",
+                "guide.md",
+                "--output",
+                "out.jsonl",
+                "--init-base-url",
+                "http://127.0.0.1:8080/v1",
+                "--init-model",
+                "qwen3.5-4b-heretic",
+                "--guide-model",
+                "deepseek/deepseek-v3.2",
+            ]
+        )
+
+        self.assertIsNone(_reasoning_from_args(args, base_url=args.init_base_url))
+        self.assertEqual(_reasoning_from_args(args, base_url=None), {"effort": "none", "exclude": True})
+
+    def test_reasoning_effort_none_disables_all_reasoning_payloads(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "generate",
+                "--guide",
+                "guide.md",
+                "--output",
+                "out.jsonl",
+                "--reasoning-effort",
+                "none",
+            ]
+        )
+
+        self.assertEqual(_reasoning_from_args(args, base_url=None), {"effort": "none", "exclude": True})
 
 
 if __name__ == "__main__":

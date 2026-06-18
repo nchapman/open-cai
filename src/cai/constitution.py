@@ -1,4 +1,4 @@
-"""Compile freeform constitution Markdown into human-editable response guides."""
+"""Compile freeform constitution Markdown into response guides."""
 
 from __future__ import annotations
 
@@ -138,13 +138,13 @@ def validate_guide_data(payload: object) -> dict[str, object]:
 
 
 def guide_to_markdown(guide: Mapping[str, object]) -> str:
-    """Serialize guide data as human-editable Markdown."""
+    """Serialize guide data as reviewable Markdown."""
 
     data = validate_guide_data(guide)
     lines = [
         f"# {data['title']}",
         "",
-        "<!-- Generated response guide. Edit this Markdown directly before generating data. -->",
+        "<!-- Generated response guide. Edit the source constitution Markdown, then recompile. -->",
         "",
         "## Overview",
         "",

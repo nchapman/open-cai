@@ -12,6 +12,8 @@ from cai.openrouter import (
     OpenRouterClient,
     OpenRouterError,
     OpenRouterSettings,
+    _reasoning_from_args,
+    build_parser,
     settings_from_env,
 )
 
@@ -53,12 +55,26 @@ class OpenRouterTests(unittest.TestCase):
             self.assertEqual(settings.api_key, "test-key")
             self.assertEqual(settings.app_title, "cai-test")
 
+    def test_local_base_url_does_not_require_openrouter_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_key = os.environ.pop("OPENROUTER_API_KEY", None)
+            try:
+                os.environ["OPENROUTER_API_KEY"] = "real-openrouter-key"
+                settings = settings_from_env(Path(tmp) / ".env", base_url="http://127.0.0.1:8080/v1")
+            finally:
+                os.environ.pop("OPENROUTER_API_KEY", None)
+                if old_key is not None:
+                    os.environ["OPENROUTER_API_KEY"] = old_key
+
+        self.assertEqual(settings.base_url, "http://127.0.0.1:8080/v1")
+        self.assertEqual(settings.api_key, "local-token")
+
     def test_model_roles_are_code_defaults_not_env_settings(self) -> None:
         self.assertEqual(COMPILER_MODEL, "deepseek/deepseek-v4-pro")
-        self.assertEqual(GUIDE_APPLICATION_MODEL, "deepseek/deepseek-v4-flash")
+        self.assertEqual(GUIDE_APPLICATION_MODEL, "deepseek/deepseek-v3.2")
         self.assertEqual(DEFAULT_CHAT_MODEL, GUIDE_APPLICATION_MODEL)
         self.assertEqual(COMPILER_REASONING, {"effort": "high", "exclude": True})
-        self.assertEqual(GUIDE_APPLICATION_REASONING, {"effort": "medium", "exclude": True})
+        self.assertEqual(GUIDE_APPLICATION_REASONING, {"effort": "none", "exclude": True})
 
     def test_chat_includes_reasoning_when_provided(self) -> None:
         client = FakeOpenRouterClient()
@@ -71,6 +87,21 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(content, "ok")
         self.assertEqual(client.payloads[0][1]["model"], DEFAULT_CHAT_MODEL)
         self.assertEqual(client.payloads[0][1]["reasoning"], {"effort": "low", "exclude": True})
+
+    def test_chat_uses_configured_base_url(self) -> None:
+        client = FakeOpenRouterClient()
+        client.settings = OpenRouterSettings(api_key="local-token", base_url="http://127.0.0.1:8080/v1")
+
+        client.chat([{"role": "user", "content": "hello"}], model="local-model")
+
+        self.assertEqual(client.payloads[0][1]["model"], "local-model")
+
+    def test_reasoning_effort_none_is_sent_to_openrouter_but_not_local(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["chat", "hello", "--reasoning-effort", "none"])
+
+        self.assertEqual(_reasoning_from_args(args, base_url=None), {"effort": "none", "exclude": True})
+        self.assertIsNone(_reasoning_from_args(args, base_url="http://127.0.0.1:8080/v1"))
 
     def test_requires_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

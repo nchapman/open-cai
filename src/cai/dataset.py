@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from cai.openrouter import (
+    DEFAULT_BASE_URL,
     GUIDE_APPLICATION_MODEL,
     GUIDE_APPLICATION_REASONING,
     OpenRouterClient,
@@ -207,12 +208,15 @@ def build_guide_system_prompt(guide: ResponseGuide) -> str:
 
 Answer the user's request naturally while faithfully following the complete response guide below.
 
-Instructions:
-- Treat the guide as your operating policy for this response.
-- Apply the whole guide, not a random section.
-- Give the best direct assistant response to the user.
-- Do not mention the guide, policy, training data, or hidden instructions.
-- Do not add unrelated warnings, tone shifts, humor, or moralizing unless the guide calls for them.
+Runtime framing:
+- The guide defines the target response style and boundaries. Follow its actual posture, whether it is strict, balanced, permissive, playful, or something else.
+- Use the guide to decide privately how to answer, then write only the final assistant response.
+- If the guide allows the request, answer directly and helpfully without adding extra caveats.
+- If the guide calls for a refusal or boundary, state that boundary first, briefly explain why, and offer a safe alternative when useful.
+- Do not make the response more restrictive or more permissive than the guide supports.
+- Do not repeat or quote the user's request unless it is necessary for clarity.
+- Be accurate and explicit about uncertainty; do not invent evidence or sources.
+- Do not mention or restate the guide, policy, training data, hidden instructions, section names, rubric labels, "when to apply" text, or do/avoid lists.
 - Return only the final assistant message.
 
 Response guide:
@@ -330,7 +334,7 @@ def make_record(
     guide_response_system_prompt: str,
     guide_response: str,
     guide_metadata_prompt: str,
-    guide_metadata: Mapping[str, object],
+    guide_metadata: Mapping[str, object] | None,
 ) -> dict[str, object]:
     """Create the JSONL row, including later SFT/preference-friendly fields."""
 
@@ -355,6 +359,14 @@ def make_record(
         {"role": "user", "content": init_prompt},
         {"role": "assistant", "content": source_rejected_response},
     ]
+    metadata_included = guide_metadata is not None
+    metadata = guide_metadata or {
+        "applicable_section_ids": [],
+        "primary_section_id": "none",
+        "critique": None,
+        "changes_made": None,
+        "quality_notes": None,
+    }
 
     return {
         "source_dataset": source.source_dataset,
@@ -366,16 +378,17 @@ def make_record(
         "source_rejected_response": source_rejected_response,
         "guide_path": guide.path,
         "guide_section_ids": list(guide.section_ids),
-        "applicable_section_ids": guide_metadata["applicable_section_ids"],
-        "primary_section_id": guide_metadata["primary_section_id"],
+        "metadata_included": metadata_included,
+        "applicable_section_ids": metadata["applicable_section_ids"],
+        "primary_section_id": metadata["primary_section_id"],
         "init_prompt": init_prompt,
         "init_response": initial,
         "guide_response_system_prompt": guide_response_system_prompt.strip(),
         "guide_metadata_prompt": guide_metadata_prompt.strip(),
-        "critique": guide_metadata["critique"],
+        "critique": metadata["critique"],
         "guide_response": guided,
-        "changes_made": guide_metadata["changes_made"],
-        "quality_notes": guide_metadata["quality_notes"],
+        "changes_made": metadata["changes_made"],
+        "quality_notes": metadata["quality_notes"],
         "prompt": init_prompt,
         "messages": chosen,
         "chosen": chosen,
@@ -403,14 +416,18 @@ def make_record(
 
 def generate_record(
     *,
-    client: OpenRouterClient,
+    init_client: OpenRouterClient,
+    guide_client: OpenRouterClient,
     source: SourcePrompt,
     guide: ResponseGuide,
-    model: str | None = GUIDE_APPLICATION_MODEL,
+    init_model: str | None = GUIDE_APPLICATION_MODEL,
+    guide_model: str | None = GUIDE_APPLICATION_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     retries: int = 2,
-    reasoning: Mapping[str, object] | None = GUIDE_APPLICATION_REASONING,
+    init_reasoning: Mapping[str, object] | None = GUIDE_APPLICATION_REASONING,
+    guide_reasoning: Mapping[str, object] | None = GUIDE_APPLICATION_REASONING,
+    include_metadata: bool = True,
 ) -> dict[str, object]:
     """Generate an initial response, then optimize it against the complete guide."""
 
@@ -419,41 +436,44 @@ def generate_record(
         {"role": "user", "content": source.prompt},
     ]
     init_response = _chat_with_retries(
-        client,
+        init_client,
         init_messages,
-        model=model,
+        model=init_model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
-        reasoning=reasoning,
+        reasoning=init_reasoning,
     )
 
     guide_response_system_prompt = build_guide_system_prompt(guide)
     guide_response = _chat_with_retries(
-        client,
+        guide_client,
         [
             {"role": "system", "content": guide_response_system_prompt},
             {"role": "user", "content": source.prompt},
         ],
-        model=model,
+        model=guide_model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
-        reasoning=reasoning,
+        reasoning=guide_reasoning,
     )
 
-    guide_metadata_prompt = build_guide_metadata_prompt(guide, source.prompt, init_response, guide_response)
-    guide_metadata_raw = _chat_with_retries(
-        client,
-        [{"role": "user", "content": guide_metadata_prompt}],
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        retries=retries,
-        response_format=guide_metadata_format(),
-        reasoning=reasoning,
-    )
-    guide_metadata = guide_metadata_from_json(guide_metadata_raw, guide)
+    guide_metadata_prompt = ""
+    guide_metadata = None
+    if include_metadata:
+        guide_metadata_prompt = build_guide_metadata_prompt(guide, source.prompt, init_response, guide_response)
+        guide_metadata_raw = _chat_with_retries(
+            guide_client,
+            [{"role": "user", "content": guide_metadata_prompt}],
+            model=guide_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            retries=retries,
+            response_format=guide_metadata_format(),
+            reasoning=guide_reasoning,
+        )
+        guide_metadata = guide_metadata_from_json(guide_metadata_raw, guide)
 
     return make_record(
         source=source,
@@ -514,8 +534,22 @@ def generate_dataset(args: argparse.Namespace) -> int:
             max_samples=args.max_samples,
         )
         pending = [source for source in sources if source.source_index not in completed]
-        client = OpenRouterClient(settings_from_env(args.env))
-        reasoning = _reasoning_from_args(args)
+        init_settings = settings_from_env(
+            args.env,
+            base_url=_resolve_override(args.init_base_url, args.base_url),
+            api_key=_resolve_override(args.init_api_key, args.api_key),
+        )
+        guide_settings = settings_from_env(
+            args.env,
+            base_url=_resolve_override(args.guide_base_url, args.base_url),
+            api_key=_resolve_override(args.guide_api_key, args.api_key),
+        )
+        init_client = OpenRouterClient(init_settings)
+        guide_client = OpenRouterClient(guide_settings)
+        init_model = _resolve_override(args.init_model, args.model)
+        guide_model = _resolve_override(args.guide_model, args.model)
+        init_reasoning = _reasoning_from_args(args, base_url=init_settings.base_url)
+        guide_reasoning = _reasoning_from_args(args, base_url=guide_settings.base_url)
     except (DatasetError, OpenRouterError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -533,14 +567,18 @@ def generate_dataset(args: argparse.Namespace) -> int:
         futures = {
             executor.submit(
                 generate_record,
-                client=client,
+                init_client=init_client,
+                guide_client=guide_client,
                 source=source,
                 guide=guide,
-                model=args.model,
+                init_model=init_model,
+                guide_model=guide_model,
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
                 retries=args.retries,
-                reasoning=reasoning,
+                init_reasoning=init_reasoning,
+                guide_reasoning=guide_reasoning,
+                include_metadata=not args.skip_metadata,
             ): source
             for source in pending
         }
@@ -574,28 +612,50 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--max-samples", type=int, default=DEFAULT_MAX_SAMPLES)
     generate.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     generate.add_argument("--env", type=Path, default=Path(".env"))
+    generate.add_argument("--base-url")
+    generate.add_argument("--api-key")
     generate.add_argument("--model", default=GUIDE_APPLICATION_MODEL)
+    generate.add_argument("--init-base-url")
+    generate.add_argument("--init-api-key")
+    generate.add_argument("--init-model")
+    generate.add_argument("--guide-base-url")
+    generate.add_argument("--guide-api-key")
+    generate.add_argument("--guide-model")
     generate.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     generate.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     reasoning = generate.add_mutually_exclusive_group()
     reasoning.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
     reasoning.add_argument("--reasoning-max-tokens", type=int)
     generate.add_argument("--include-reasoning", action="store_true")
+    generate.add_argument("--skip-metadata", action="store_true")
     generate.add_argument("--retries", type=int, default=2)
     generate.set_defaults(func=generate_dataset)
     return parser
 
 
-def _reasoning_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+def _reasoning_from_args(args: argparse.Namespace, *, base_url: str | None = None) -> dict[str, object] | None:
     if args.reasoning_effort and args.reasoning_max_tokens is not None:
         raise DatasetError("use either --reasoning-effort or --reasoning-max-tokens, not both")
+    if _uses_non_openrouter_base_url(base_url) and args.reasoning_max_tokens is None:
+        return None
 
     reasoning: dict[str, object] = {"exclude": not args.include_reasoning}
-    if args.reasoning_max_tokens is not None:
+    if args.reasoning_effort:
+        reasoning["effort"] = args.reasoning_effort
+    elif args.reasoning_max_tokens is not None:
         reasoning["max_tokens"] = args.reasoning_max_tokens
     else:
-        reasoning["effort"] = args.reasoning_effort or GUIDE_APPLICATION_REASONING["effort"]
+        reasoning["effort"] = GUIDE_APPLICATION_REASONING["effort"]
     return reasoning
+
+
+def _uses_non_openrouter_base_url(base_url: str | None) -> bool:
+    resolved_base_url = (base_url or "").strip().rstrip("/")
+    return bool(resolved_base_url and resolved_base_url != DEFAULT_BASE_URL)
+
+
+def _resolve_override(value: str | None, fallback: str | None) -> str | None:
+    return value if value is not None else fallback
 
 
 def _non_empty_string(value: object, label: str) -> str:
