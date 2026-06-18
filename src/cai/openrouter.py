@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ COMPILER_MODEL = "deepseek/deepseek-v4-pro"
 GUIDE_APPLICATION_MODEL = "deepseek/deepseek-v3.2"
 COMPILER_REASONING = {"effort": "high", "exclude": True}
 GUIDE_APPLICATION_REASONING = {"effort": "none", "exclude": True}
+DEFAULT_REQUEST_TIMEOUT = 180.0
 
 
 Message = Mapping[str, str]
@@ -32,6 +34,7 @@ class OpenRouterError(RuntimeError):
 class OpenRouterSettings:
     api_key: str
     base_url: str = DEFAULT_BASE_URL
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     app_url: str | None = None
     app_title: str | None = None
 
@@ -60,6 +63,7 @@ def settings_from_env(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> OpenRouterSettings:
     """Build OpenRouter settings from environment variables and `.env`."""
 
@@ -80,6 +84,7 @@ def settings_from_env(
     return OpenRouterSettings(
         api_key=resolved_api_key,
         base_url=resolved_base_url,
+        request_timeout=request_timeout,
         app_url=os.getenv("APP_URL"),
         app_title=os.getenv("APP_TITLE"),
     )
@@ -136,18 +141,27 @@ class OpenRouterClient:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=self.settings.request_timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise OpenRouterError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise OpenRouterError(f"OpenRouter request failed: {exc.reason}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise OpenRouterError(f"OpenRouter request timed out after {self.settings.request_timeout:g}s") from exc
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
     try:
-        client = OpenRouterClient(settings_from_env(args.env, base_url=args.base_url, api_key=args.api_key))
+        client = OpenRouterClient(
+            settings_from_env(
+                args.env,
+                base_url=args.base_url,
+                api_key=args.api_key,
+                request_timeout=args.request_timeout,
+            )
+        )
         content = client.chat(
             [{"role": "user", "content": args.prompt}],
             model=args.model,
@@ -175,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--model")
     chat.add_argument("--temperature", type=float, default=0.7)
     chat.add_argument("--max-tokens", type=int, default=1000)
+    chat.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     chat.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
     chat.add_argument("--reasoning-max-tokens", type=int)
     chat.add_argument("--include-reasoning", action="store_true")
@@ -207,6 +222,8 @@ def _uses_non_openrouter_base_url(base_url: str | None) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "request_timeout", DEFAULT_REQUEST_TIMEOUT) <= 0:
+        parser.error("--request-timeout must be greater than 0")
     return int(args.func(args))
 
 

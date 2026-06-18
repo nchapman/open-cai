@@ -12,6 +12,7 @@ from cai.dataset import (
     GUIDE_APPLICATION_REASONING,
     ResponseGuide,
     SourcePrompt,
+    _chat_with_retries,
     _reasoning_from_args,
     build_guide_metadata_prompt,
     build_guide_system_prompt,
@@ -26,6 +27,7 @@ from cai.dataset import (
     load_source_prompts,
     make_record,
 )
+from cai.openrouter import DEFAULT_REQUEST_TIMEOUT, OpenRouterError
 
 
 class FakeClient:
@@ -36,6 +38,17 @@ class FakeClient:
     def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((list(messages), kwargs))
         return self.responses.pop(0)
+
+
+class FlakyClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            raise OpenRouterError("temporary timeout")
+        return "recovered"
 
 
 def sample_guide() -> ResponseGuide:
@@ -158,9 +171,32 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(completed, {1})
 
     def test_wraps_dataset_load_failures(self) -> None:
-        with mock.patch("datasets.load.load_dataset", side_effect=PermissionError("cache denied")):
+        with mock.patch("datasets.load_dataset", side_effect=PermissionError("cache denied")):
             with self.assertRaisesRegex(DatasetError, "failed to load dataset"):
                 load_source_prompts(max_samples=1)
+
+    def test_load_source_prompts_skips_rows_with_empty_assistant_turns(self) -> None:
+        fake_dataset = [
+            {
+                "chosen": "\n\nHuman: Good row\n\nAssistant: chosen",
+                "rejected": "\n\nHuman: Good row\n\nAssistant: rejected",
+            },
+            {
+                "chosen": "\n\nHuman: Bad row\n\nAssistant: ",
+                "rejected": "\n\nHuman: Bad row\n\nAssistant: rejected",
+            },
+            {
+                "chosen": "\n\nHuman: Another good row\n\nAssistant: chosen 2",
+                "rejected": "\n\nHuman: Another good row\n\nAssistant: rejected 2",
+            },
+        ]
+
+        with mock.patch("datasets.load_dataset", return_value=fake_dataset), mock.patch("sys.stderr"):
+            prompts = load_source_prompts(max_samples=-1)
+
+        self.assertEqual([source.source_index for source in prompts], [0, 2])
+        self.assertEqual(prompts[0].prompt, "Good row")
+        self.assertEqual(prompts[1].source_chosen_response, "chosen 2")
 
     def test_guide_metadata_format_uses_strict_json_schema(self) -> None:
         response_format = guide_metadata_format()
@@ -353,6 +389,30 @@ class DatasetTests(unittest.TestCase):
         )
 
         self.assertEqual(_reasoning_from_args(args, base_url=None), {"effort": "none", "exclude": True})
+
+    def test_generate_parser_request_timeout_default(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["generate", "--guide", "guide.md", "--output", "out.jsonl"])
+
+        self.assertEqual(args.request_timeout, DEFAULT_REQUEST_TIMEOUT)
+
+    def test_chat_with_retries_retries_openrouter_errors(self) -> None:
+        client = FlakyClient()
+
+        with mock.patch("cai.dataset.time.sleep") as sleep:
+            result = _chat_with_retries(
+                client,  # type: ignore[arg-type]
+                [{"role": "user", "content": "hello"}],
+                model="model",
+                temperature=0.4,
+                max_tokens=100,
+                retries=1,
+            )
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(sleep.call_count, 1)
 
 
 if __name__ == "__main__":

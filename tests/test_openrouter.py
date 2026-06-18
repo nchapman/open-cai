@@ -1,12 +1,15 @@
 from pathlib import Path
 import os
+import socket
 import tempfile
 import unittest
+from unittest import mock
 
 from cai.openrouter import (
     COMPILER_MODEL,
     COMPILER_REASONING,
     DEFAULT_CHAT_MODEL,
+    DEFAULT_REQUEST_TIMEOUT,
     GUIDE_APPLICATION_MODEL,
     GUIDE_APPLICATION_REASONING,
     OpenRouterClient,
@@ -69,6 +72,15 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(settings.base_url, "http://127.0.0.1:8080/v1")
         self.assertEqual(settings.api_key, "local-token")
 
+    def test_request_timeout_is_configurable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("OPENROUTER_API_KEY=test-key\n", encoding="utf-8")
+
+            settings = settings_from_env(path, request_timeout=42)
+
+        self.assertEqual(settings.request_timeout, 42)
+
     def test_model_roles_are_code_defaults_not_env_settings(self) -> None:
         self.assertEqual(COMPILER_MODEL, "deepseek/deepseek-v4-pro")
         self.assertEqual(GUIDE_APPLICATION_MODEL, "deepseek/deepseek-v3.2")
@@ -95,6 +107,19 @@ class OpenRouterTests(unittest.TestCase):
         client.chat([{"role": "user", "content": "hello"}], model="local-model")
 
         self.assertEqual(client.payloads[0][1]["model"], "local-model")
+
+    def test_post_wraps_socket_timeout(self) -> None:
+        client = OpenRouterClient(OpenRouterSettings(api_key="test-key", request_timeout=0.01))
+
+        with mock.patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+            with self.assertRaisesRegex(OpenRouterError, "timed out"):
+                client._post("/chat/completions", {"model": DEFAULT_CHAT_MODEL})
+
+    def test_chat_parser_request_timeout_default(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["chat", "hello"])
+
+        self.assertEqual(args.request_timeout, DEFAULT_REQUEST_TIMEOUT)
 
     def test_reasoning_effort_none_is_sent_to_openrouter_but_not_local(self) -> None:
         parser = build_parser()

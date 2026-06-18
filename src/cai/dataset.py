@@ -6,6 +6,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
 import json
+import random
 import re
 import sys
 import time
@@ -14,6 +15,7 @@ from typing import Iterable, Mapping, Sequence
 
 from cai.openrouter import (
     DEFAULT_BASE_URL,
+    DEFAULT_REQUEST_TIMEOUT,
     GUIDE_APPLICATION_MODEL,
     GUIDE_APPLICATION_REASONING,
     OpenRouterClient,
@@ -179,15 +181,22 @@ def load_source_prompts(
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
     prompts: list[SourcePrompt] = []
+    skipped: list[tuple[int, str]] = []
     for index, row in enumerate(dataset):
-        chosen = row.get("chosen") if isinstance(row, Mapping) else None
-        rejected = row.get("rejected") if isinstance(row, Mapping) else None
-        if not isinstance(chosen, str) or not isinstance(rejected, str):
-            raise DatasetError(f"dataset row {index} must have chosen and rejected conversations")
-        prompt = extract_human_prompt(chosen)
-        rejected_prompt = extract_human_prompt(rejected)
-        if prompt != rejected_prompt:
-            raise DatasetError(f"dataset row {index} chosen/rejected prompts do not match")
+        try:
+            chosen = row.get("chosen") if isinstance(row, Mapping) else None
+            rejected = row.get("rejected") if isinstance(row, Mapping) else None
+            if not isinstance(chosen, str) or not isinstance(rejected, str):
+                raise DatasetError("must have chosen and rejected conversations")
+            prompt = extract_human_prompt(chosen)
+            rejected_prompt = extract_human_prompt(rejected)
+            if prompt != rejected_prompt:
+                raise DatasetError("chosen/rejected prompts do not match")
+            source_chosen_response = extract_assistant_response(chosen)
+            source_rejected_response = extract_assistant_response(rejected)
+        except DatasetError as exc:
+            skipped.append((index, str(exc)))
+            continue
         prompts.append(
             SourcePrompt(
                 source_dataset=dataset_name,
@@ -196,9 +205,15 @@ def load_source_prompts(
                 prompt=prompt,
                 source_chosen_conversation=chosen,
                 source_rejected_conversation=rejected,
-                source_chosen_response=extract_assistant_response(chosen),
-                source_rejected_response=extract_assistant_response(rejected),
+                source_chosen_response=source_chosen_response,
+                source_rejected_response=source_rejected_response,
             )
+        )
+    if skipped:
+        first_index, first_reason = skipped[0]
+        print(
+            f"skipping {len(skipped)} malformed source rows; first source_index={first_index}: {first_reason}",
+            file=sys.stderr,
         )
     return prompts
 
@@ -512,7 +527,7 @@ def _chat_with_retries(
         except OpenRouterError:
             if attempt >= retries:
                 raise
-            time.sleep(min(2**attempt, 8))
+            time.sleep(_retry_sleep_seconds(attempt))
     raise AssertionError("unreachable")
 
 
@@ -538,11 +553,13 @@ def generate_dataset(args: argparse.Namespace) -> int:
             args.env,
             base_url=_resolve_override(args.init_base_url, args.base_url),
             api_key=_resolve_override(args.init_api_key, args.api_key),
+            request_timeout=args.request_timeout,
         )
         guide_settings = settings_from_env(
             args.env,
             base_url=_resolve_override(args.guide_base_url, args.base_url),
             api_key=_resolve_override(args.guide_api_key, args.api_key),
+            request_timeout=args.request_timeout,
         )
         init_client = OpenRouterClient(init_settings)
         guide_client = OpenRouterClient(guide_settings)
@@ -623,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--guide-model")
     generate.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     generate.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    generate.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     reasoning = generate.add_mutually_exclusive_group()
     reasoning.add_argument("--reasoning-effort", choices=["xhigh", "high", "medium", "low", "minimal", "none"])
     reasoning.add_argument("--reasoning-max-tokens", type=int)
@@ -658,6 +676,11 @@ def _resolve_override(value: str | None, fallback: str | None) -> str | None:
     return value if value is not None else fallback
 
 
+def _retry_sleep_seconds(attempt: int) -> float:
+    base_delay = min(2**attempt, 8)
+    return base_delay + random.uniform(0, 0.5)
+
+
 def _non_empty_string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DatasetError(f"guide metadata JSON field {label} must be a non-empty string")
@@ -669,6 +692,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
+    if args.request_timeout <= 0:
+        parser.error("--request-timeout must be greater than 0")
     return int(args.func(args))
 
 
