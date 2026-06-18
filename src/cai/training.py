@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import random
 import sys
@@ -15,6 +16,7 @@ import yaml
 DEFAULT_SEED = 42
 DEFAULT_TEST_RATIO = 0.02
 DEFAULT_OUTPUT_DIR = Path("data/training")
+DEFAULT_SFT_OUTPUT_DIR = Path("outputs/sft")
 VALID_VIEWS = {"messages", "preference"}
 
 
@@ -58,6 +60,167 @@ def prepare_from_config(config: Mapping[str, object], *, output_dir: str | Path 
     if not summary:
         raise TrainingError("config must define at least one of sft or dpo")
     return summary
+
+
+def run_sft_from_config(
+    config: Mapping[str, object],
+    *,
+    output_dir: str | Path | None = None,
+    dry_run: bool = False,
+    resume_from_checkpoint: str | bool | None = None,
+) -> dict[str, object]:
+    """Run or validate an SFT training config."""
+
+    model_config = _mapping_config(config.get("model"), "model")
+    data_config = _mapping_config(config.get("data"), "data")
+    training_config = dict(_mapping_config(config.get("training", {}), "training"))
+    sft_config = dict(_mapping_config(config.get("sft", {}), "sft"))
+
+    train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
+    eval_path_value = data_config.get("eval_path")
+    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
+    train_rows = load_sft_messages(train_path)
+    eval_rows = load_sft_messages(eval_path) if eval_path is not None else []
+
+    model_name = _string_config(model_config.get("name"), "model.name")
+    resolved_output_dir = Path(output_dir or config.get("output_dir") or DEFAULT_SFT_OUTPUT_DIR / _path_safe_model_name(model_name))
+    if not train_rows:
+        raise TrainingError("SFT train dataset is empty")
+
+    args_kwargs = build_sft_config_kwargs(
+        training_config=training_config,
+        sft_config=sft_config,
+        model_config=model_config,
+        output_dir=resolved_output_dir,
+    )
+    peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
+    peft_enabled = bool(peft_config.pop("enabled", False))
+    summary: dict[str, object] = {
+        "model": model_name,
+        "output_dir": str(resolved_output_dir),
+        "train_rows": len(train_rows),
+        "eval_rows": len(eval_rows),
+        "peft": peft_enabled,
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        return summary
+
+    try:
+        from datasets import Dataset
+        import torch
+        from transformers import AutoTokenizer
+        from trl import SFTConfig, SFTTrainer
+    except ImportError as exc:
+        raise TrainingError("SFT training requires optional deps; run `uv sync --extra train`") from exc
+
+    args_kwargs["model_init_kwargs"] = normalize_model_init_kwargs(args_kwargs.get("model_init_kwargs"), torch)
+    checked_args_kwargs = validate_kwargs(SFTConfig, args_kwargs, "SFTConfig")
+    training_args = SFTConfig(**checked_args_kwargs)
+    tokenizer_name = _string_config(model_config.get("tokenizer_name", model_name), "model.tokenizer_name")
+    tokenizer_kwargs = dict(_mapping_config(model_config.get("tokenizer_kwargs", {}), "model.tokenizer_kwargs"))
+    processing_class = AutoTokenizer.from_pretrained(tokenizer_name, **tokenizer_kwargs)
+    if processing_class.pad_token is None and processing_class.eos_token is not None:
+        processing_class.pad_token = processing_class.eos_token
+    trainer_kwargs: dict[str, object] = {
+        "model": model_name,
+        "args": training_args,
+        "processing_class": processing_class,
+        "train_dataset": Dataset.from_list(train_rows),
+    }
+    if eval_rows:
+        trainer_kwargs["eval_dataset"] = Dataset.from_list(eval_rows)
+    if peft_enabled:
+        trainer_kwargs["peft_config"] = build_peft_config(peft_config)
+
+    trainer = SFTTrainer(**trainer_kwargs)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.save_model(str(resolved_output_dir))
+    return summary
+
+
+def load_sft_messages(path: str | Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row_number, row in enumerate(read_jsonl(path), start=1):
+        try:
+            rows.append({"messages": normalize_messages(row.get("messages"))})
+        except TrainingError as exc:
+            raise TrainingError(f"{path}:{row_number}: invalid SFT row: {exc}") from exc
+    return rows
+
+
+def build_sft_config_kwargs(
+    *,
+    training_config: Mapping[str, object],
+    sft_config: Mapping[str, object],
+    model_config: Mapping[str, object],
+    output_dir: Path,
+) -> dict[str, object]:
+    args: dict[str, object] = {
+        "output_dir": str(output_dir),
+        "report_to": "none",
+        "save_strategy": "steps",
+        "eval_strategy": "no",
+    }
+    args.update(training_config)
+    args.update(sft_config)
+
+    model_init_kwargs = dict(_mapping_config(model_config.get("init_kwargs", {}), "model.init_kwargs"))
+    if model_init_kwargs:
+        args["model_init_kwargs"] = model_init_kwargs
+    return args
+
+
+def build_peft_config(config: Mapping[str, object]) -> object:
+    try:
+        from peft import LoraConfig
+    except ImportError as exc:
+        raise TrainingError("LoRA training requires optional deps; run `uv sync --extra train`") from exc
+
+    kwargs = {
+        "r": _int_config(config.get("r", 16), "peft.r"),
+        "lora_alpha": _int_config(config.get("lora_alpha", 32), "peft.lora_alpha"),
+        "lora_dropout": _float_config(config.get("lora_dropout", 0.05), "peft.lora_dropout"),
+        "bias": _string_config(config.get("bias", "none"), "peft.bias"),
+        "task_type": _string_config(config.get("task_type", "CAUSAL_LM"), "peft.task_type"),
+    }
+    target_modules = config.get("target_modules")
+    if target_modules is not None:
+        kwargs["target_modules"] = _string_list_config(target_modules, "peft.target_modules")
+    return LoraConfig(**kwargs)
+
+
+def normalize_model_init_kwargs(value: object, torch_module: object) -> object:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TrainingError("model_init_kwargs must be an object")
+    normalized = dict(value)
+    dtype_key = "dtype" if "dtype" in normalized else "torch_dtype" if "torch_dtype" in normalized else None
+    if dtype_key is not None and isinstance(normalized[dtype_key], str):
+        dtype = normalized[dtype_key].strip()
+        if dtype != "auto":
+            dtype_map = {
+                "bfloat16": getattr(torch_module, "bfloat16"),
+                "float16": getattr(torch_module, "float16"),
+                "float32": getattr(torch_module, "float32"),
+            }
+            if dtype not in dtype_map:
+                raise TrainingError(f"unsupported model dtype {dtype!r}")
+            normalized[dtype_key] = dtype_map[dtype]
+    return normalized
+
+
+def validate_kwargs(callable_object: object, kwargs: Mapping[str, object], label: str) -> dict[str, object]:
+    signature = inspect.signature(callable_object)
+    parameters = signature.parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return dict(kwargs)
+    allowed = {name for name, parameter in parameters.items() if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}}
+    unknown = sorted(set(kwargs) - allowed)
+    if unknown:
+        raise TrainingError(f"{label} does not support config keys: {', '.join(unknown)}")
+    return dict(kwargs)
 
 
 def prepare_section(
@@ -365,6 +528,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--config", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path)
     prepare.set_defaults(func=prepare_command)
+
+    sft = subparsers.add_parser("sft", help="run supervised fine-tuning from prepared messages JSONL")
+    sft.add_argument("--config", type=Path, required=True)
+    sft.add_argument("--output-dir", type=Path)
+    sft.add_argument("--dry-run", action="store_true", help="validate config and data without loading the model")
+    sft.add_argument("--resume-from-checkpoint", nargs="?", const=True)
+    sft.set_defaults(func=sft_command)
     return parser
 
 
@@ -383,10 +553,44 @@ def prepare_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sft_command(args: argparse.Namespace) -> int:
+    try:
+        config = load_yaml_config(args.config)
+        summary = run_sft_from_config(
+            config,
+            output_dir=args.output_dir,
+            dry_run=args.dry_run,
+            resume_from_checkpoint=args.resume_from_checkpoint,
+        )
+    except TrainingError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    mode = "validated" if summary["dry_run"] else "trained"
+    print(
+        f"sft: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows "
+        f"for {summary['model']} -> {summary['output_dir']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _string_config(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise TrainingError(f"{label} must be a non-empty string")
     return value.strip()
+
+
+def _string_list_config(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise TrainingError(f"{label} must be a non-empty list")
+    strings = [_string_config(item, label) for item in value]
+    return strings
+
+
+def _mapping_config(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TrainingError(f"{label} must be an object")
+    return value
 
 
 def _int_config(value: object, label: str) -> int:
@@ -405,6 +609,10 @@ def _float_config(value: object, label: str) -> float:
     if not isinstance(value, (int, float)):
         raise TrainingError(f"{label} must be a number")
     return float(value)
+
+
+def _path_safe_model_name(value: str) -> str:
+    return value.strip().replace("/", "-")
 
 
 def main(argv: list[str] | None = None) -> int:

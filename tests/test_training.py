@@ -8,8 +8,10 @@ from cai.training import (
     TrainingError,
     normalize_messages_row,
     normalize_preference_row,
+    normalize_model_init_kwargs,
     prepare_from_config,
     resolve_sample_counts,
+    run_sft_from_config,
     sample_jsonl,
 )
 
@@ -192,6 +194,63 @@ class TrainingTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 5)
         self.assertEqual(len({row["messages"][0]["content"] for row in rows}), 5)  # type: ignore[index]
+
+    def test_sft_dry_run_validates_prepared_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_path = root / "train.jsonl"
+            eval_path = root / "test.jsonl"
+            train_path.write_text(
+                json.dumps({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}]}),
+                encoding="utf-8",
+            )
+            eval_path.write_text(
+                json.dumps({"messages": [{"role": "user", "content": "eu"}, {"role": "assistant", "content": "ea"}]}),
+                encoding="utf-8",
+            )
+
+            summary = run_sft_from_config(
+                {
+                    "output_dir": str(root / "out"),
+                    "model": {"name": "Qwen/Qwen3-0.6B"},
+                    "data": {"train_path": str(train_path), "eval_path": str(eval_path)},
+                    "training": {"max_steps": 1},
+                    "sft": {"max_length": 512, "assistant_only_loss": True},
+                    "peft": {"enabled": True, "r": 8},
+                },
+                dry_run=True,
+            )
+
+        self.assertEqual(summary["train_rows"], 1)
+        self.assertEqual(summary["eval_rows"], 1)
+        self.assertEqual(summary["model"], "Qwen/Qwen3-0.6B")
+        self.assertTrue(summary["peft"])
+        self.assertTrue(summary["dry_run"])
+
+    def test_sft_rejects_invalid_messages_before_training(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_path = root / "train.jsonl"
+            train_path.write_text(json.dumps({"messages": [{"role": "user", "content": ""}]}), encoding="utf-8")
+
+            with self.assertRaisesRegex(TrainingError, "invalid SFT row"):
+                run_sft_from_config(
+                    {
+                        "model": {"name": "Qwen/Qwen3-0.6B"},
+                        "data": {"train_path": str(train_path)},
+                    },
+                    dry_run=True,
+                )
+
+    def test_normalizes_yaml_dtype_for_model_init_kwargs(self) -> None:
+        class FakeTorch:
+            bfloat16 = object()
+            float16 = object()
+            float32 = object()
+
+        normalized = normalize_model_init_kwargs({"dtype": "bfloat16"}, FakeTorch)
+
+        self.assertEqual(normalized, {"dtype": FakeTorch.bfloat16})
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ Run the tests:
 uv run python -m unittest discover -s tests
 ```
 
+Training requires the optional training extra:
+
+```bash
+uv sync --extra train
+```
+
 ## Constitutions
 
 Constitutions are freeform Markdown. The sample files use a short opening
@@ -131,6 +137,24 @@ dpo/test.jsonl
 
 SFT rows use `messages`. DPO rows use explicit conversational `prompt`,
 `chosen`, and `rejected` fields for TRL compatibility.
+
+## Train
+
+Start with a dry run to validate the config and prepared SFT rows without
+loading a model:
+
+```bash
+uv run cai-train sft --config configs/training/sft-smoke.yaml --dry-run
+```
+
+Run the one-step SFT smoke train after installing training dependencies:
+
+```bash
+uv run --extra train cai-train sft --config configs/training/sft-smoke.yaml
+```
+
+The SFT command uses TRL's conversational `messages` format directly. LoRA is
+enabled in the smoke config and can be disabled or tuned in YAML.
 
 ## Model Defaults
 
