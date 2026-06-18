@@ -11,6 +11,7 @@ from cai.training import (
     normalize_model_init_kwargs,
     prepare_from_config,
     resolve_sample_counts,
+    run_dpo_from_config,
     run_sft_from_config,
     sample_jsonl,
 )
@@ -251,6 +252,85 @@ class TrainingTests(unittest.TestCase):
         normalized = normalize_model_init_kwargs({"dtype": "bfloat16"}, FakeTorch)
 
         self.assertEqual(normalized, {"dtype": FakeTorch.bfloat16})
+
+    def test_dpo_dry_run_validates_prepared_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_path = root / "train.jsonl"
+            eval_path = root / "test.jsonl"
+            row = {
+                "prompt": [{"role": "user", "content": "Question"}],
+                "chosen": [{"role": "assistant", "content": "Good"}],
+                "rejected": [{"role": "assistant", "content": "Bad"}],
+            }
+            train_path.write_text(json.dumps(row), encoding="utf-8")
+            eval_path.write_text(json.dumps(row), encoding="utf-8")
+
+            summary = run_dpo_from_config(
+                {
+                    "output_dir": str(root / "out"),
+                    "model": {"name": "tvall43/Qwen3.5-4B-heretic", "adapter_path": str(root / "sft")},
+                    "data": {"train_path": str(train_path), "eval_path": str(eval_path)},
+                    "training": {"max_steps": 1},
+                    "dpo": {"beta": 0.1, "max_length": 512},
+                },
+                dry_run=True,
+            )
+
+        self.assertEqual(summary["train_rows"], 1)
+        self.assertEqual(summary["eval_rows"], 1)
+        self.assertEqual(summary["model"], "tvall43/Qwen3.5-4B-heretic")
+        self.assertEqual(summary["adapter_path"], str(root / "sft"))
+        self.assertTrue(summary["peft"])
+
+    def test_dpo_rejects_invalid_preference_rows_before_training(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_path = root / "train.jsonl"
+            train_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": [{"role": "user", "content": "Question"}],
+                        "chosen": [{"role": "user", "content": "Wrong role"}],
+                        "rejected": [{"role": "assistant", "content": "Bad"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TrainingError, "invalid DPO row"):
+                run_dpo_from_config(
+                    {
+                        "model": {"name": "tvall43/Qwen3.5-4B-heretic"},
+                        "data": {"train_path": str(train_path)},
+                    },
+                    dry_run=True,
+                )
+
+    def test_dpo_rejects_adapter_path_with_new_peft_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_path = root / "train.jsonl"
+            train_path.write_text(
+                json.dumps(
+                    {
+                        "prompt": [{"role": "user", "content": "Question"}],
+                        "chosen": [{"role": "assistant", "content": "Good"}],
+                        "rejected": [{"role": "assistant", "content": "Bad"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TrainingError, "adapter_path or peft.enabled"):
+                run_dpo_from_config(
+                    {
+                        "model": {"name": "tvall43/Qwen3.5-4B-heretic", "adapter_path": str(root / "sft")},
+                        "data": {"train_path": str(train_path)},
+                        "peft": {"enabled": True},
+                    },
+                    dry_run=True,
+                )
 
 
 if __name__ == "__main__":

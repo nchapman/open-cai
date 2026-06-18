@@ -1,0 +1,31 @@
+output_dir: outputs/dpo/smoke
+
+model:
+  name: tvall43/Qwen3.5-4B-heretic
+  adapter_path: outputs/sft/smoke
+  chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
+  init_kwargs:
+    dtype: bfloat16
+    attn_implementation: sdpa
+
+data:
+  train_path: data/training/smoke/dpo/train.jsonl
+  eval_path: data/training/smoke/dpo/test.jsonl
+
+training:
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00005
+  max_steps: 1
+  logging_steps: 1
+  save_strategy: "no"
+  eval_strategy: "no"
+  bf16: false
+  fp16: false
+  gradient_checkpointing: true
+  report_to: none
+
+dpo:
+  beta: 0.1
+  max_length: 384

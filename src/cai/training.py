@@ -17,6 +17,7 @@ DEFAULT_SEED = 42
 DEFAULT_TEST_RATIO = 0.02
 DEFAULT_OUTPUT_DIR = Path("data/training")
 DEFAULT_SFT_OUTPUT_DIR = Path("outputs/sft")
+DEFAULT_DPO_OUTPUT_DIR = Path("outputs/dpo")
 VALID_VIEWS = {"messages", "preference"}
 
 
@@ -139,6 +140,89 @@ def run_sft_from_config(
     return summary
 
 
+def run_dpo_from_config(
+    config: Mapping[str, object],
+    *,
+    output_dir: str | Path | None = None,
+    dry_run: bool = False,
+    resume_from_checkpoint: str | bool | None = None,
+) -> dict[str, object]:
+    """Run or validate a DPO training config."""
+
+    model_config = _mapping_config(config.get("model"), "model")
+    data_config = _mapping_config(config.get("data"), "data")
+    training_config = dict(_mapping_config(config.get("training", {}), "training"))
+    dpo_config = dict(_mapping_config(config.get("dpo", {}), "dpo"))
+
+    train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
+    eval_path_value = data_config.get("eval_path")
+    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
+    train_rows = load_dpo_preferences(train_path)
+    eval_rows = load_dpo_preferences(eval_path) if eval_path is not None else []
+
+    model_name = _string_config(model_config.get("name"), "model.name")
+    adapter_path = model_config.get("adapter_path")
+    resolved_output_dir = Path(output_dir or config.get("output_dir") or DEFAULT_DPO_OUTPUT_DIR / _path_safe_model_name(model_name))
+    if not train_rows:
+        raise TrainingError("DPO train dataset is empty")
+
+    args_kwargs = build_dpo_config_kwargs(
+        training_config=training_config,
+        dpo_config=dpo_config,
+        model_config=model_config,
+        output_dir=resolved_output_dir,
+    )
+    peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
+    peft_enabled = bool(peft_config.pop("enabled", False))
+    if adapter_path is not None and peft_enabled:
+        raise TrainingError("use either model.adapter_path or peft.enabled, not both")
+
+    summary: dict[str, object] = {
+        "model": model_name,
+        "adapter_path": str(adapter_path) if adapter_path is not None else "",
+        "output_dir": str(resolved_output_dir),
+        "train_rows": len(train_rows),
+        "eval_rows": len(eval_rows),
+        "peft": peft_enabled or adapter_path is not None,
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        return summary
+
+    try:
+        from datasets import Dataset
+        import torch
+        from trl import DPOConfig, DPOTrainer
+    except ImportError as exc:
+        raise TrainingError("DPO training requires optional deps; run `uv sync --extra train`") from exc
+
+    args_kwargs["model_init_kwargs"] = normalize_model_init_kwargs(args_kwargs.get("model_init_kwargs"), torch)
+    if adapter_path is not None:
+        model_init_kwargs = args_kwargs.pop("model_init_kwargs")
+    else:
+        model_init_kwargs = args_kwargs["model_init_kwargs"]
+    checked_args_kwargs = validate_kwargs(DPOConfig, args_kwargs, "DPOConfig")
+    training_args = DPOConfig(**checked_args_kwargs)
+    processing_class = load_tokenizer(model_config, model_name, padding_side="left")
+    model = load_train_model(model_config, model_name, model_init_kwargs)
+
+    trainer_kwargs: dict[str, object] = {
+        "model": model,
+        "args": training_args,
+        "processing_class": processing_class,
+        "train_dataset": Dataset.from_list(train_rows),
+    }
+    if eval_rows:
+        trainer_kwargs["eval_dataset"] = Dataset.from_list(eval_rows)
+    if peft_enabled:
+        trainer_kwargs["peft_config"] = build_peft_config(peft_config)
+
+    trainer = DPOTrainer(**trainer_kwargs)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.save_model(str(resolved_output_dir))
+    return summary
+
+
 def load_sft_messages(path: str | Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row_number, row in enumerate(read_jsonl(path), start=1):
@@ -146,6 +230,25 @@ def load_sft_messages(path: str | Path) -> list[dict[str, object]]:
             rows.append({"messages": normalize_messages(row.get("messages"))})
         except TrainingError as exc:
             raise TrainingError(f"{path}:{row_number}: invalid SFT row: {exc}") from exc
+    return rows
+
+
+def load_dpo_preferences(path: str | Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row_number, row in enumerate(read_jsonl(path), start=1):
+        try:
+            prompt = normalize_messages(row.get("prompt"))
+            chosen = normalize_messages(row.get("chosen"))
+            rejected = normalize_messages(row.get("rejected"))
+            if not prompt:
+                raise TrainingError("prompt is empty")
+            if not chosen or chosen[-1]["role"] != "assistant":
+                raise TrainingError("chosen must end with an assistant message")
+            if not rejected or rejected[-1]["role"] != "assistant":
+                raise TrainingError("rejected must end with an assistant message")
+            rows.append({"prompt": prompt, "chosen": chosen, "rejected": rejected})
+        except TrainingError as exc:
+            raise TrainingError(f"{path}:{row_number}: invalid DPO row: {exc}") from exc
     return rows
 
 
@@ -169,6 +272,65 @@ def build_sft_config_kwargs(
     if model_init_kwargs:
         args["model_init_kwargs"] = model_init_kwargs
     return args
+
+
+def build_dpo_config_kwargs(
+    *,
+    training_config: Mapping[str, object],
+    dpo_config: Mapping[str, object],
+    model_config: Mapping[str, object],
+    output_dir: Path,
+) -> dict[str, object]:
+    args: dict[str, object] = {
+        "output_dir": str(output_dir),
+        "report_to": "none",
+        "save_strategy": "steps",
+        "eval_strategy": "no",
+    }
+    args.update(training_config)
+    args.update(dpo_config)
+
+    model_init_kwargs = dict(_mapping_config(model_config.get("init_kwargs", {}), "model.init_kwargs"))
+    if model_init_kwargs:
+        args["model_init_kwargs"] = model_init_kwargs
+    return args
+
+
+def load_tokenizer(model_config: Mapping[str, object], model_name: str, *, padding_side: str) -> object:
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise TrainingError("tokenizer loading requires optional deps; run `uv sync --extra train`") from exc
+
+    tokenizer_name = _string_config(model_config.get("tokenizer_name", model_name), "model.tokenizer_name")
+    tokenizer_kwargs = dict(_mapping_config(model_config.get("tokenizer_kwargs", {}), "model.tokenizer_kwargs"))
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, **tokenizer_kwargs)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = padding_side
+    chat_template_path = model_config.get("chat_template_path")
+    if chat_template_path is not None:
+        tokenizer.chat_template = Path(_string_config(chat_template_path, "model.chat_template_path")).read_text(encoding="utf-8")
+    return tokenizer
+
+
+def load_train_model(model_config: Mapping[str, object], model_name: str, model_init_kwargs: object) -> object:
+    adapter_path = model_config.get("adapter_path")
+    if adapter_path is None:
+        return model_name
+    try:
+        from peft import PeftModel
+        from trl.trainer.dpo_trainer import create_model_from_path
+    except ImportError as exc:
+        raise TrainingError("adapter training requires optional deps; run `uv sync --extra train`") from exc
+
+    kwargs = dict(_mapping_config(model_init_kwargs or {}, "model_init_kwargs"))
+    base_model = create_model_from_path(model_name, **kwargs)
+    return PeftModel.from_pretrained(
+        base_model,
+        _string_config(adapter_path, "model.adapter_path"),
+        is_trainable=True,
+    )
 
 
 def build_peft_config(config: Mapping[str, object]) -> object:
@@ -535,6 +697,13 @@ def build_parser() -> argparse.ArgumentParser:
     sft.add_argument("--dry-run", action="store_true", help="validate config and data without loading the model")
     sft.add_argument("--resume-from-checkpoint", nargs="?", const=True)
     sft.set_defaults(func=sft_command)
+
+    dpo = subparsers.add_parser("dpo", help="run direct preference optimization from prepared preference JSONL")
+    dpo.add_argument("--config", type=Path, required=True)
+    dpo.add_argument("--output-dir", type=Path)
+    dpo.add_argument("--dry-run", action="store_true", help="validate config and data without loading the model")
+    dpo.add_argument("--resume-from-checkpoint", nargs="?", const=True)
+    dpo.set_defaults(func=dpo_command)
     return parser
 
 
@@ -569,6 +738,28 @@ def sft_command(args: argparse.Namespace) -> int:
     print(
         f"sft: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows "
         f"for {summary['model']} -> {summary['output_dir']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def dpo_command(args: argparse.Namespace) -> int:
+    try:
+        config = load_yaml_config(args.config)
+        summary = run_dpo_from_config(
+            config,
+            output_dir=args.output_dir,
+            dry_run=args.dry_run,
+            resume_from_checkpoint=args.resume_from_checkpoint,
+        )
+    except TrainingError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    mode = "validated" if summary["dry_run"] else "trained"
+    adapter = f" from {summary['adapter_path']}" if summary["adapter_path"] else ""
+    print(
+        f"dpo: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows "
+        f"for {summary['model']}{adapter} -> {summary['output_dir']}",
         file=sys.stderr,
     )
     return 0

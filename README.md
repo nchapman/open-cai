@@ -156,6 +156,16 @@ uv run --extra train cai-train sft --config configs/training/sft-smoke.yaml
 The SFT command uses TRL's conversational `messages` format directly. LoRA is
 enabled in the smoke config and can be disabled or tuned in YAML.
 
+Run the one-step DPO smoke train from the SFT smoke adapter:
+
+```bash
+uv run --extra train cai-train dpo --config configs/training/dpo-smoke.yaml
+```
+
+The DPO command uses prepared conversational `prompt`, `chosen`, and `rejected`
+rows. When `model.adapter_path` is set, DPO continues that adapter and uses the
+pre-DPO adapter state as the reference policy.
+
 ## Model Defaults
 
 Model choices live in code rather than `.env`:
