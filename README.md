@@ -97,6 +97,41 @@ Each output row includes the prompt, source HH-RLHF responses, generated initial
 response, guide-optimized response, `chosen`/`rejected` message pairs, and
 comparison pairs for later analysis.
 
+## Prepare Training Data
+
+Training prep is config-driven and supports both local JSONL files and Hugging
+Face datasets. Local CAI data is the default path for generated constitution
+data; uploading to the Hub is optional for sharing.
+
+Smoke test the prep pipeline:
+
+```bash
+uv run cai-train prepare --config configs/training/smoke.yaml
+```
+
+Prepare the balanced mix:
+
+```bash
+uv run cai-train prepare --config configs/training/balanced.yaml
+```
+
+The default balanced config uses:
+
+- SFT: `HuggingFaceTB/smoltalk` / `smol-magpie-ultra` plus local CAI `messages`
+- DPO: cleaned UltraFeedback plus local CAI `chosen` / `rejected`
+
+Prepared files are written under `data/training/<name>/`:
+
+```text
+sft/train.jsonl
+sft/test.jsonl
+dpo/train.jsonl
+dpo/test.jsonl
+```
+
+SFT rows use `messages`. DPO rows use explicit conversational `prompt`,
+`chosen`, and `rejected` fields for TRL compatibility.
+
 ## Model Defaults
 
 Model choices live in code rather than `.env`:

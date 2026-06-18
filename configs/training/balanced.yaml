@@ -1,0 +1,30 @@
+seed: 42
+test_ratio: 0.02
+output_dir: data/training/balanced
+
+sft:
+  datasets:
+    - source: hf
+      id: HuggingFaceTB/smoltalk
+      config: smol-magpie-ultra
+      split: train
+      view: messages
+      samples: 60000
+
+    - source: local
+      path: data/generated/qwen-local-deepseek-v3-2-balanced-full.jsonl
+      view: messages
+      samples: 10000
+
+dpo:
+  datasets:
+    - source: hf
+      id: argilla/ultrafeedback-binarized-preferences-cleaned
+      split: train
+      view: preference
+      samples: 50000
+
+    - source: local
+      path: data/generated/qwen-local-deepseek-v3-2-balanced-full.jsonl
+      view: preference
+      samples: 20000

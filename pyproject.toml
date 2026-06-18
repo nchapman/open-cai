@@ -13,6 +13,7 @@ dependencies = [
 cai-constitution = "cai.constitution:main"
 cai-dataset = "cai.dataset:main"
 cai-openrouter = "cai.openrouter:main"
+cai-train = "cai.training:main"
 
 [build-system]
 requires = ["uv_build>=0.8.15,<0.9.0"]
