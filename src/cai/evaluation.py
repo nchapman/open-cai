@@ -6,6 +6,7 @@ import argparse
 import gc
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
@@ -160,6 +161,10 @@ def validate_suite_config(config: Mapping[str, object]) -> None:
     sections = enabled_suite_sections(config)
     if not sections:
         raise EvaluationError("suite config must define at least one eval section")
+    suite_config = _mapping_config(config.get("suite", {}), "suite")
+    judge_config = _mapping_config(suite_config.get("judge", {}), "suite.judge")
+    if "concurrency" in judge_config:
+        _positive_int_config(judge_config["concurrency"], "suite.judge.concurrency")
     if "capability" in sections:
         parse_capability_config(_mapping_config(config["capability"], "capability"))
     if "refusals" in sections:
@@ -174,6 +179,8 @@ def parse_capability_config(config: Mapping[str, object]) -> dict[str, object]:
     tasks = config.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise EvaluationError("capability.tasks must be a non-empty list")
+    batch_size = _batch_size_config(config.get("batch_size", "auto"), "capability.batch_size")
+    max_gen_toks = _optional_int_config(config.get("max_gen_toks"), "capability.max_gen_toks")
     parsed_tasks: list[dict[str, object]] = []
     for index, task in enumerate(tasks):
         if isinstance(task, str):
@@ -183,11 +190,13 @@ def parse_capability_config(config: Mapping[str, object]) -> dict[str, object]:
                 {
                     "task": _string_config(task.get("task"), f"capability.tasks[{index}].task"),
                     "limit": _optional_int_config(task.get("limit"), f"capability.tasks[{index}].limit"),
+                    "batch_size": _optional_batch_size_config(task.get("batch_size"), f"capability.tasks[{index}].batch_size"),
+                    "max_gen_toks": _optional_int_config(task.get("max_gen_toks"), f"capability.tasks[{index}].max_gen_toks"),
                 }
             )
         else:
             raise EvaluationError(f"capability.tasks[{index}] must be a string or object")
-    return {"tasks": parsed_tasks}
+    return {"tasks": parsed_tasks, "batch_size": batch_size, "max_gen_toks": max_gen_toks}
 
 
 def parse_refusal_config(config: Mapping[str, object]) -> dict[str, object]:
@@ -274,12 +283,16 @@ def parse_generation_config(value: object) -> dict[str, object]:
     do_sample = config.get("do_sample", bool(temperature))
     if not isinstance(do_sample, bool):
         raise EvaluationError("generation.do_sample must be a boolean")
+    batch_size = config.get("batch_size", 1)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        raise EvaluationError("generation.batch_size must be a positive integer")
     return {
         "max_new_tokens": max_new_tokens,
         "temperature": float(temperature),
         "do_sample": do_sample,
         "top_p": float(config.get("top_p", 1.0)),
         "strip_thinking": bool(config.get("strip_thinking", True)),
+        "batch_size": batch_size,
     }
 
 
@@ -294,7 +307,10 @@ def run_capability_eval(
     except ImportError as exc:
         raise EvaluationError("capability eval requires `uv sync --extra eval`") from exc
 
-    tasks = parse_capability_config(config)["tasks"]
+    parsed = parse_capability_config(config)
+    tasks = parsed["tasks"]
+    default_batch_size = parsed["batch_size"]
+    default_max_gen_toks = parsed["max_gen_toks"]
     rows: list[dict[str, object]] = []
     summary_rows: list[dict[str, object]] = []
     try:
@@ -303,12 +319,15 @@ def run_capability_eval(
         raise EvaluationError("capability eval requires `uv sync --extra eval`") from exc
 
     def evaluate_model(model_spec: Mapping[str, object], tokenizer: object, model: object) -> None:
-        hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size="auto")
-        try:
-            for task_spec in tasks:
+        for task_spec in tasks:
+            batch_size = task_spec.get("batch_size") or default_batch_size
+            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+            try:
                 task_name = _string_config(task_spec.get("task"), "capability.task")
                 limit = task_spec.get("limit")
-                results = lm_eval.simple_evaluate(model=hflm, tasks=[task_name], limit=limit)
+                max_gen_toks = task_spec.get("max_gen_toks") or default_max_gen_toks
+                gen_kwargs = {"max_gen_toks": max_gen_toks} if max_gen_toks is not None else None
+                results = lm_eval.simple_evaluate(model=hflm, tasks=[task_name], limit=limit, gen_kwargs=gen_kwargs)
                 task_results = results["results"][task_name]
                 for metric, value in task_results.items():
                     if metric == "alias":
@@ -331,8 +350,8 @@ def run_capability_eval(
                             "value": float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value,
                         }
                     )
-        finally:
-            del hflm
+            finally:
+                del hflm
 
     for_loaded_eval_model(models, torch, evaluate_model)
     path = output_dir / "capability.jsonl"
@@ -359,9 +378,9 @@ def run_refusal_eval(
     def evaluate_model(model_spec: Mapping[str, object], tokenizer: object, model: object) -> None:
         model.eval()
         refusal_count = 0
-        for prompt in prompts:
-            messages = [{"role": "user", "content": prompt["text"]}]
-            raw_response = generate_response(model=model, tokenizer=tokenizer, messages=messages, generation=generation, torch_module=torch)
+        messages_batch = [[{"role": "user", "content": prompt["text"]}] for prompt in prompts]
+        raw_responses = generate_responses(model=model, tokenizer=tokenizer, messages_batch=messages_batch, generation=generation, torch_module=torch)
+        for prompt, raw_response in zip(prompts, raw_responses, strict=True):
             response = strip_thinking_blocks(raw_response) if generation.get("strip_thinking") else raw_response
             refusal = is_refusal(response, markers)
             refusal_count += int(refusal)
@@ -453,10 +472,14 @@ def run_constitution_judge_eval(
         )
     )
     judge_model = _string_config(judge_config.get("model", parsed["judge_model"]), "suite.judge.model")
-    rows: list[dict[str, object]] = []
-    for record in responses:
-        judgment = judge_constitution_response(client=client, model=judge_model, guide=guide, record=record)
-        rows.append({**record, "judgment": judgment})
+    concurrency = _positive_int_config(judge_config.get("concurrency", 1), "suite.judge.concurrency")
+    rows = judge_constitution_responses(
+        client=client,
+        model=judge_model,
+        guide=guide,
+        records=responses,
+        concurrency=concurrency,
+    )
     path = output_dir / "constitution_judge.jsonl"
     write_jsonl(path, rows)
     summary_rows = summarize_constitution_judgments(rows, models=models)
@@ -480,11 +503,16 @@ def run_local_generations(
     def evaluate_model(model_spec: Mapping[str, object], tokenizer: object, model: object) -> None:
         model_name = _string_config(model_spec.get("name"), "model.name")
         model.eval()
+        messages_batch: list[list[Mapping[str, str]]] = []
+        prompt_batch: list[Mapping[str, object]] = []
         for prompt in prompts:
             messages = prompt["messages"]
             if not isinstance(messages, list):
                 raise EvaluationError("prompt messages must be a list")
-            raw_response = generate_response(model=model, tokenizer=tokenizer, messages=messages, generation=generation, torch_module=torch)
+            messages_batch.append(messages)
+            prompt_batch.append(prompt)
+        raw_responses = generate_responses(model=model, tokenizer=tokenizer, messages_batch=messages_batch, generation=generation, torch_module=torch)
+        for prompt, messages, raw_response in zip(prompt_batch, messages_batch, raw_responses, strict=True):
             response = strip_thinking_blocks(raw_response) if generation.get("strip_thinking") else raw_response
             records.append(
                 {
@@ -616,34 +644,58 @@ def generate_response(
     generation: Mapping[str, object],
     torch_module: object,
 ) -> str:
-    encoded = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
-    if isinstance(encoded, Mapping):
-        input_ids = encoded["input_ids"]
-        attention_mask = encoded.get("attention_mask")
-    else:
-        input_ids = encoded
-        attention_mask = None
+    return generate_responses(
+        model=model,
+        tokenizer=tokenizer,
+        messages_batch=[messages],
+        generation=generation,
+        torch_module=torch_module,
+    )[0]
+
+
+def generate_responses(
+    *,
+    model: object,
+    tokenizer: object,
+    messages_batch: Sequence[Sequence[Mapping[str, str]]],
+    generation: Mapping[str, object],
+    torch_module: object,
+) -> list[str]:
+    if not messages_batch:
+        return []
+    rendered = [
+        tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        for messages in messages_batch
+    ]
+    batch_size = int(generation.get("batch_size", 1))
+    responses: list[str] = []
     device = next(model.parameters()).device
-    input_ids = input_ids.to(device)
-    if attention_mask is None:
-        attention_mask = torch_module.ones_like(input_ids)
-    else:
-        attention_mask = attention_mask.to(device)
-    kwargs = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "max_new_tokens": generation["max_new_tokens"],
-        "do_sample": generation["do_sample"],
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-    if generation["do_sample"]:
-        kwargs["temperature"] = generation["temperature"]
-        kwargs["top_p"] = generation["top_p"]
-    with torch_module.no_grad():
-        output_ids = model.generate(**kwargs)
-    new_tokens = output_ids[0, input_ids.shape[-1] :]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    for offset in range(0, len(rendered), batch_size):
+        batch = rendered[offset : offset + batch_size]
+        encoded = tokenizer(batch, add_special_tokens=False, padding=True, return_tensors="pt")
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch_module.ones_like(input_ids)
+        else:
+            attention_mask = attention_mask.to(device)
+        kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "max_new_tokens": generation["max_new_tokens"],
+            "do_sample": generation["do_sample"],
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+        if generation["do_sample"]:
+            kwargs["temperature"] = generation["temperature"]
+            kwargs["top_p"] = generation["top_p"]
+        with torch_module.no_grad():
+            output_ids = model.generate(**kwargs)
+        for row in output_ids:
+            new_tokens = row[input_ids.shape[-1] :]
+            responses.append(tokenizer.decode(new_tokens, skip_special_tokens=True).strip())
+    return responses
 
 
 def first_token_logprobs(
@@ -740,6 +792,25 @@ def judge_constitution_response(
     if not isinstance(parsed, dict):
         raise EvaluationError("constitution judge returned non-object JSON")
     return parsed
+
+
+def judge_constitution_responses(
+    *,
+    client: OpenRouterClient,
+    model: str,
+    guide: str,
+    records: Sequence[Mapping[str, object]],
+    concurrency: int,
+) -> list[dict[str, object]]:
+    def judge(record: Mapping[str, object]) -> dict[str, object]:
+        judgment = judge_constitution_response(client=client, model=model, guide=guide, record=record)
+        return {**record, "judgment": judgment}
+
+    if concurrency == 1 or len(records) <= 1:
+        return [judge(record) for record in records]
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        return list(executor.map(judge, records))
 
 
 def constitution_judge_response_format() -> dict[str, object]:
@@ -952,9 +1023,38 @@ def _mapping_config(value: object, label: str) -> Mapping[str, object]:
 def _optional_int_config(value: object, label: str) -> int | None:
     if value is None:
         return None
-    if not isinstance(value, int):
+    return _positive_int_config(value, label)
+
+
+def _positive_int_config(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
         raise EvaluationError(f"{label} must be an integer")
+    if value < 1:
+        raise EvaluationError(f"{label} must be a positive integer")
     return value
+
+
+def _batch_size_config(value: object, label: str) -> int | str:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip():
+        normalized = value.strip()
+        if normalized == "auto":
+            return normalized
+        if normalized.startswith("auto:"):
+            try:
+                schedule = float(normalized.split(":", 1)[1])
+            except ValueError as exc:
+                raise EvaluationError(f"{label} must be a positive integer or 'auto'") from exc
+            if schedule > 0:
+                return normalized
+    raise EvaluationError(f"{label} must be a positive integer or 'auto'")
+
+
+def _optional_batch_size_config(value: object, label: str) -> int | str | None:
+    if value is None:
+        return None
+    return _batch_size_config(value, label)
 
 
 def main(argv: list[str] | None = None) -> int:

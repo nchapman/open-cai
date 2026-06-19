@@ -6,6 +6,7 @@ from cai.evaluation import (
     EvaluationError,
     group_eval_models,
     is_refusal,
+    judge_constitution_responses,
     parse_capability_config,
     parse_generation_config,
     parse_model_specs,
@@ -90,11 +91,40 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(EvaluationError, "max_new_tokens"):
             parse_generation_config({"max_new_tokens": 0})
 
-    def test_parse_capability_config_accepts_task_limits(self) -> None:
-        parsed = parse_capability_config({"tasks": [{"task": "hellaswag", "limit": 10}, "ifeval"]})
+    def test_parse_generation_config_rejects_bool_batch_size(self) -> None:
+        with self.assertRaisesRegex(EvaluationError, "batch_size"):
+            parse_generation_config({"max_new_tokens": 8, "batch_size": True})
 
-        self.assertEqual(parsed["tasks"][0], {"task": "hellaswag", "limit": 10})  # type: ignore[index]
+    def test_parse_generation_config_accepts_batch_size(self) -> None:
+        parsed = parse_generation_config({"max_new_tokens": 8, "batch_size": 4})
+
+        self.assertEqual(parsed["batch_size"], 4)
+
+    def test_parse_capability_config_accepts_batch_size_and_safety_cap(self) -> None:
+        parsed = parse_capability_config({"batch_size": 5, "max_gen_toks": 256, "tasks": [{"task": "hellaswag", "limit": 10}, "ifeval"]})
+
+        self.assertEqual(parsed["batch_size"], 5)
+        self.assertEqual(parsed["max_gen_toks"], 256)
+        self.assertEqual(parsed["tasks"][0], {"task": "hellaswag", "limit": 10, "batch_size": None, "max_gen_toks": None})  # type: ignore[index]
         self.assertEqual(parsed["tasks"][1], {"task": "ifeval"})  # type: ignore[index]
+
+    def test_parse_capability_config_rejects_invalid_auto_batch_size(self) -> None:
+        with self.assertRaisesRegex(EvaluationError, "batch_size"):
+            parse_capability_config({"batch_size": "auto:soon", "tasks": ["hellaswag"]})
+
+    def test_suite_dry_run_validates_judge_concurrency(self) -> None:
+        with self.assertRaisesRegex(EvaluationError, "suite.judge.concurrency"):
+            run_suite_from_config(
+                {
+                    "models": [{"label": "base", "name": "model"}],
+                    "suite": {"judge": {"concurrency": 0}},
+                    "constitution": {
+                        "guide": "constitutions/guides/balanced.guide.md",
+                        "prompts": [{"id": "p", "prompt": "Question"}],
+                    },
+                },
+                dry_run=True,
+            )
 
     def test_parse_refusal_config_uses_default_markers(self) -> None:
         parsed = parse_refusal_config({"dataset": "bad", "split": "test[:2]", "column": "text"})
@@ -147,6 +177,24 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("50.00%", report)
         self.assertIn("0.000000", report)
         self.assertIn("4.00", report)
+
+    def test_judge_constitution_responses_preserves_record_order(self) -> None:
+        import cai.evaluation as evaluation
+
+        records = [{"prompt_id": "a"}, {"prompt_id": "b"}, {"prompt_id": "c"}]
+        original = evaluation.judge_constitution_response
+
+        def fake_judge_constitution_response(*, client, model, guide, record):  # type: ignore[no-untyped-def]
+            return {"score": 5, "prompt_id": record["prompt_id"]}
+
+        evaluation.judge_constitution_response = fake_judge_constitution_response
+        try:
+            rows = judge_constitution_responses(client=object(), model="judge", guide="guide", records=records, concurrency=3)  # type: ignore[arg-type]
+        finally:
+            evaluation.judge_constitution_response = original
+
+        self.assertEqual([row["prompt_id"] for row in rows], ["a", "b", "c"])
+        self.assertEqual([row["judgment"]["prompt_id"] for row in rows], ["a", "b", "c"])  # type: ignore[index]
 
     def test_eval_run_writes_report_with_mocked_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

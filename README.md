@@ -199,6 +199,10 @@ The fast suite includes:
 It writes `summary.md` plus detailed JSON/JSONL artifacts under
 `outputs/eval/fast/`.
 
+The eval YAML supports `batch_size` for local generation and lm-eval tasks. Use
+`max_gen_toks` on generated capability tasks as a generous runaway-response
+safety cap, not as the main tuning dial for benchmark quality.
+
 ## Model Defaults
 
 Model choices live in code rather than `.env`:

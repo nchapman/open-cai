@@ -2,6 +2,7 @@ output_dir: outputs/eval/smoke
 
 generation:
   max_new_tokens: 320
+  batch_size: 4
   temperature: 0.0
   do_sample: false
   strip_thinking: true
