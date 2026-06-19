@@ -10,6 +10,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+eval = [
+    "accelerate>=1.10.0",
+    "immutabledict>=4.2.0",
+    "langdetect>=1.0.9",
+    "lm-eval[hf]>=0.4.0",
+    "peft>=0.17.0",
+    "torch>=2.6.0",
+    "transformers>=4.55.0",
+    "trl>=0.25.0",
+]
 train = [
     "accelerate>=1.10.0",
     "peft>=0.17.0",
@@ -21,6 +31,7 @@ train = [
 [project.scripts]
 cai-constitution = "cai.constitution:main"
 cai-dataset = "cai.dataset:main"
+cai-eval = "cai.evaluation:main"
 cai-openrouter = "cai.openrouter:main"
 cai-train = "cai.training:main"
 

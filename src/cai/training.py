@@ -118,7 +118,7 @@ def run_sft_from_config(
     args_kwargs["model_init_kwargs"] = normalize_model_init_kwargs(args_kwargs.get("model_init_kwargs"), torch)
     checked_args_kwargs = validate_kwargs(SFTConfig, args_kwargs, "SFTConfig")
     training_args = SFTConfig(**checked_args_kwargs)
-    tokenizer_name = _string_config(model_config.get("tokenizer_name", model_name), "model.tokenizer_name")
+    tokenizer_name = _string_config(model_config.get("tokenizer_name") or model_name, "model.tokenizer_name")
     tokenizer_kwargs = dict(_mapping_config(model_config.get("tokenizer_kwargs", {}), "model.tokenizer_kwargs"))
     processing_class = AutoTokenizer.from_pretrained(tokenizer_name, **tokenizer_kwargs)
     if processing_class.pad_token is None and processing_class.eos_token is not None:

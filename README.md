@@ -166,6 +166,39 @@ The DPO command uses prepared conversational `prompt`, `chosen`, and `rejected`
 rows. When `model.adapter_path` is set, DPO continues that adapter and uses the
 pre-DPO adapter state as the reference policy.
 
+## Evaluate
+
+Run a small side-by-side local eval against base, SFT, and DPO variants:
+
+```bash
+uv run --extra train cai-eval run --config configs/eval/smoke.yaml
+```
+
+The eval harness reads prompts and model variants from YAML, runs each model
+sequentially to keep VRAM use predictable, and writes:
+
+```text
+outputs/eval/smoke/results.jsonl
+outputs/eval/smoke/report.md
+```
+
+Run the fast evaluation suite for a broader signal:
+
+```bash
+uv sync --extra eval
+uv run --extra eval cai-eval suite --config configs/eval/fast.yaml
+```
+
+The fast suite includes:
+
+- capability checks via `lm-eval`
+- refusal counts on `mlabonne/harmful_behaviors`
+- behavior drift KL on `mlabonne/harmless_alpaca`
+- constitution judging against the compiled guide
+
+It writes `summary.md` plus detailed JSON/JSONL artifacts under
+`outputs/eval/fast/`.
+
 ## Model Defaults
 
 Model choices live in code rather than `.env`:
