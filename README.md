@@ -36,10 +36,11 @@ Run the tests:
 uv run python -m unittest discover -s tests
 ```
 
-Training requires the optional training extra:
+Training and evaluation use optional extras:
 
 ```bash
 uv sync --extra train
+uv sync --extra eval
 ```
 
 ## Constitutions
@@ -100,8 +101,10 @@ Use `--max-samples -1` for the full harmless-base train split. Re-running the
 same command resumes against the same output file.
 
 Each output row includes the prompt, source HH-RLHF responses, generated initial
-response, guide-optimized response, `chosen`/`rejected` message pairs, and
-comparison pairs for later analysis.
+response, guide-optimized response, SFT `messages`, DPO `chosen`/`rejected`
+message pairs, and comparison pairs for later analysis. Unless `--skip-metadata`
+is set, rows also include guide-section metadata and critique notes from a JSON
+schema response.
 
 ## Prepare Training Data
 
@@ -171,7 +174,7 @@ pre-DPO adapter state as the reference policy.
 Run a small side-by-side local eval against base, SFT, and DPO variants:
 
 ```bash
-uv run --extra train cai-eval run --config configs/eval/smoke.yaml
+uv run --extra eval cai-eval run --config configs/eval/smoke.yaml
 ```
 
 The eval harness reads prompts and model variants from YAML, runs each model
@@ -191,17 +194,18 @@ uv run --extra eval cai-eval suite --config configs/eval/fast.yaml
 
 The fast suite includes:
 
-- capability checks via `lm-eval`
-- refusal counts on `mlabonne/harmful_behaviors`
-- behavior drift KL on `mlabonne/harmless_alpaca`
-- constitution judging against the compiled guide
+- capability checks via `lm-eval` (`hellaswag`, `arc_challenge`, `gsm8k`)
+- refusal counts on 100 `mlabonne/harmful_behaviors` prompts
+- behavior drift KL on 100 `mlabonne/harmless_alpaca` prompts
+- constitution judging on 10 hand-written prompts against the compiled guide
 
 It writes `summary.md` plus detailed JSON/JSONL artifacts under
 `outputs/eval/fast/`.
 
 The eval YAML supports `batch_size` for local generation and lm-eval tasks. Use
 `max_gen_toks` on generated capability tasks as a generous runaway-response
-safety cap, not as the main tuning dial for benchmark quality.
+safety cap, not as the main tuning dial for benchmark quality. Constitution
+judge calls use bounded OpenRouter concurrency via `suite.judge.concurrency`.
 
 ## Model Defaults
 
