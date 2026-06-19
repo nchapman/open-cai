@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -82,6 +83,8 @@ def run_sft_from_config(
     eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
     train_rows = load_sft_messages(train_path)
     eval_rows = load_sft_messages(eval_path) if eval_path is not None else []
+    dropped_train_rows = 0
+    dropped_eval_rows = 0
 
     model_name = _string_config(model_config.get("name"), "model.name")
     resolved_output_dir = Path(output_dir or config.get("output_dir") or DEFAULT_SFT_OUTPUT_DIR / _path_safe_model_name(model_name))
@@ -94,6 +97,13 @@ def run_sft_from_config(
         model_config=model_config,
         output_dir=resolved_output_dir,
     )
+    if _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"):
+        tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=sft_config.get("chat_template_path"))
+        max_length = _int_config(sft_config.get("max_length", 1024), "sft.max_length")
+        train_rows, dropped_train_rows = drop_overlength_sft_rows(train_rows, tokenizer, max_length=max_length)
+        eval_rows, dropped_eval_rows = drop_overlength_sft_rows(eval_rows, tokenizer, max_length=max_length)
+        if not train_rows:
+            raise TrainingError("SFT train dataset is empty after dropping overlength rows")
     peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
     peft_enabled = bool(peft_config.pop("enabled", False))
     summary: dict[str, object] = {
@@ -101,6 +111,8 @@ def run_sft_from_config(
         "output_dir": str(resolved_output_dir),
         "train_rows": len(train_rows),
         "eval_rows": len(eval_rows),
+        "dropped_train_rows": dropped_train_rows,
+        "dropped_eval_rows": dropped_eval_rows,
         "peft": peft_enabled,
         "dry_run": dry_run,
     }
@@ -159,6 +171,8 @@ def run_dpo_from_config(
     eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
     train_rows = load_dpo_preferences(train_path)
     eval_rows = load_dpo_preferences(eval_path) if eval_path is not None else []
+    dropped_train_rows = 0
+    dropped_eval_rows = 0
 
     model_name = _string_config(model_config.get("name"), "model.name")
     adapter_path = model_config.get("adapter_path")
@@ -172,6 +186,13 @@ def run_dpo_from_config(
         model_config=model_config,
         output_dir=resolved_output_dir,
     )
+    if _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"):
+        tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=model_config.get("chat_template_path"))
+        max_length = _int_config(dpo_config.get("max_length", 1024), "dpo.max_length")
+        train_rows, dropped_train_rows = drop_overlength_dpo_rows(train_rows, tokenizer, max_length=max_length)
+        eval_rows, dropped_eval_rows = drop_overlength_dpo_rows(eval_rows, tokenizer, max_length=max_length)
+        if not train_rows:
+            raise TrainingError("DPO train dataset is empty after dropping overlength rows")
     peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
     peft_enabled = bool(peft_config.pop("enabled", False))
     if adapter_path is not None and peft_enabled:
@@ -183,6 +204,8 @@ def run_dpo_from_config(
         "output_dir": str(resolved_output_dir),
         "train_rows": len(train_rows),
         "eval_rows": len(eval_rows),
+        "dropped_train_rows": dropped_train_rows,
+        "dropped_eval_rows": dropped_eval_rows,
         "peft": peft_enabled or adapter_path is not None,
         "dry_run": dry_run,
     }
@@ -250,6 +273,149 @@ def load_dpo_preferences(path: str | Path) -> list[dict[str, object]]:
         except TrainingError as exc:
             raise TrainingError(f"{path}:{row_number}: invalid DPO row: {exc}") from exc
     return rows
+
+
+def analyze_sft_lengths_from_config(config: Mapping[str, object]) -> dict[str, object]:
+    model_config = _mapping_config(config.get("model"), "model")
+    data_config = _mapping_config(config.get("data"), "data")
+    sft_config = _mapping_config(config.get("sft", {}), "sft")
+    train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
+    model_name = _string_config(model_config.get("name"), "model.name")
+    tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=sft_config.get("chat_template_path"))
+    max_length = _int_config(sft_config.get("max_length", 1024), "sft.max_length")
+
+    lengths = []
+    for row in load_sft_messages(train_path):
+        lengths.append(len(tokenizer.apply_chat_template(row["messages"], tokenize=True, return_dict=False)))
+    return {
+        "kind": "sft",
+        "train_path": str(train_path),
+        "max_length": max_length,
+        "drop_overlength": _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"),
+        "lengths": summarize_lengths(lengths, caps=[max_length]),
+    }
+
+
+def analyze_dpo_lengths_from_config(config: Mapping[str, object]) -> dict[str, object]:
+    model_config = _mapping_config(config.get("model"), "model")
+    data_config = _mapping_config(config.get("data"), "data")
+    dpo_config = _mapping_config(config.get("dpo", {}), "dpo")
+    train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
+    model_name = _string_config(model_config.get("name"), "model.name")
+    tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=model_config.get("chat_template_path"))
+    max_length = _int_config(dpo_config.get("max_length", 1024), "dpo.max_length")
+
+    prompt_lengths: list[int] = []
+    chosen_lengths: list[int] = []
+    rejected_lengths: list[int] = []
+    max_pair_lengths: list[int] = []
+    prefix_mismatches = 0
+    for row in load_dpo_preferences(train_path):
+        prompt_ids = tokenizer.apply_chat_template(
+            row["prompt"],
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=False,
+        )
+        chosen_ids = tokenizer.apply_chat_template(row["prompt"] + row["chosen"], tokenize=True, return_dict=False)
+        rejected_ids = tokenizer.apply_chat_template(row["prompt"] + row["rejected"], tokenize=True, return_dict=False)
+        if chosen_ids[: len(prompt_ids)] != prompt_ids or rejected_ids[: len(prompt_ids)] != prompt_ids:
+            prefix_mismatches += 1
+        prompt_lengths.append(len(prompt_ids))
+        chosen_lengths.append(len(chosen_ids))
+        rejected_lengths.append(len(rejected_ids))
+        max_pair_lengths.append(max(len(chosen_ids), len(rejected_ids)))
+    return {
+        "kind": "dpo",
+        "train_path": str(train_path),
+        "max_length": max_length,
+        "drop_overlength": _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"),
+        "prefix_mismatches": prefix_mismatches,
+        "prompt_lengths": summarize_lengths(prompt_lengths, caps=[max_length]),
+        "chosen_lengths": summarize_lengths(chosen_lengths, caps=[max_length]),
+        "rejected_lengths": summarize_lengths(rejected_lengths, caps=[max_length]),
+        "max_pair_lengths": summarize_lengths(max_pair_lengths, caps=[max_length]),
+    }
+
+
+def load_length_tokenizer(model_config: Mapping[str, object], model_name: str, *, chat_template_path: object) -> object:
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise TrainingError("length analysis requires optional deps; run `uv sync --extra train`") from exc
+
+    tokenizer_name = _string_config(model_config.get("tokenizer_name", model_name), "model.tokenizer_name")
+    tokenizer_kwargs = dict(_mapping_config(model_config.get("tokenizer_kwargs", {}), "model.tokenizer_kwargs"))
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, **tokenizer_kwargs)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    if chat_template_path is not None:
+        tokenizer.chat_template = Path(_string_config(chat_template_path, "chat_template_path")).read_text(encoding="utf-8")
+    return tokenizer
+
+
+def drop_overlength_sft_rows(
+    rows: Sequence[dict[str, object]],
+    tokenizer: object,
+    *,
+    max_length: int,
+) -> tuple[list[dict[str, object]], int]:
+    kept = []
+    dropped = 0
+    for row in rows:
+        if len(tokenizer.apply_chat_template(row["messages"], tokenize=True, return_dict=False)) > max_length:
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
+
+
+def drop_overlength_dpo_rows(
+    rows: Sequence[dict[str, object]],
+    tokenizer: object,
+    *,
+    max_length: int,
+) -> tuple[list[dict[str, object]], int]:
+    kept = []
+    dropped = 0
+    for row in rows:
+        chosen_length = len(tokenizer.apply_chat_template(row["prompt"] + row["chosen"], tokenize=True, return_dict=False))
+        rejected_length = len(
+            tokenizer.apply_chat_template(row["prompt"] + row["rejected"], tokenize=True, return_dict=False)
+        )
+        if max(chosen_length, rejected_length) > max_length:
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
+
+
+def summarize_lengths(values: Sequence[int], *, caps: Sequence[int]) -> dict[str, object]:
+    if not values:
+        return {"count": 0}
+    sorted_values = sorted(values)
+    summary: dict[str, object] = {
+        "count": len(sorted_values),
+        "min": sorted_values[0],
+        "p50": percentile(sorted_values, 0.50),
+        "p75": percentile(sorted_values, 0.75),
+        "p90": percentile(sorted_values, 0.90),
+        "p95": percentile(sorted_values, 0.95),
+        "p99": percentile(sorted_values, 0.99),
+        "max": sorted_values[-1],
+        "over_cap": {},
+    }
+    over_cap: dict[int, dict[str, object]] = {}
+    for cap in caps:
+        count = sum(1 for value in sorted_values if value > cap)
+        over_cap[cap] = {"count": count, "percent": count * 100 / len(sorted_values)}
+    summary["over_cap"] = over_cap
+    return summary
+
+
+def percentile(sorted_values: Sequence[int], q: float) -> int:
+    index = max(0, min(len(sorted_values) - 1, int(q * len(sorted_values) + 0.999999) - 1))
+    return sorted_values[index]
 
 
 def build_sft_config_kwargs(
@@ -325,12 +491,21 @@ def load_train_model(model_config: Mapping[str, object], model_name: str, model_
         raise TrainingError("adapter training requires optional deps; run `uv sync --extra train`") from exc
 
     kwargs = dict(_mapping_config(model_init_kwargs or {}, "model_init_kwargs"))
+    if is_distributed_training():
+        kwargs["device_map"] = None
     base_model = create_model_from_path(model_name, **kwargs)
     return PeftModel.from_pretrained(
         base_model,
         _string_config(adapter_path, "model.adapter_path"),
         is_trainable=True,
     )
+
+
+def is_distributed_training() -> bool:
+    try:
+        return int(os.environ.get("WORLD_SIZE", "1")) > 1
+    except ValueError:
+        return False
 
 
 def build_peft_config(config: Mapping[str, object]) -> object:
@@ -704,6 +879,11 @@ def build_parser() -> argparse.ArgumentParser:
     dpo.add_argument("--dry-run", action="store_true", help="validate config and data without loading the model")
     dpo.add_argument("--resume-from-checkpoint", nargs="?", const=True)
     dpo.set_defaults(func=dpo_command)
+
+    lengths = subparsers.add_parser("lengths", help="analyze configured training token lengths")
+    lengths.add_argument("--config", type=Path, required=True)
+    lengths.add_argument("--fail-on-truncation", action="store_true", help="exit non-zero if any row exceeds max_length")
+    lengths.set_defaults(func=lengths_command)
     return parser
 
 
@@ -735,8 +915,9 @@ def sft_command(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     mode = "validated" if summary["dry_run"] else "trained"
+    dropped = dropped_rows_label(summary)
     print(
-        f"sft: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows "
+        f"sft: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows{dropped} "
         f"for {summary['model']} -> {summary['output_dir']}",
         file=sys.stderr,
     )
@@ -757,12 +938,88 @@ def dpo_command(args: argparse.Namespace) -> int:
         return 1
     mode = "validated" if summary["dry_run"] else "trained"
     adapter = f" from {summary['adapter_path']}" if summary["adapter_path"] else ""
+    dropped = dropped_rows_label(summary)
     print(
-        f"dpo: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows "
+        f"dpo: {mode} {summary['train_rows']} train, {summary['eval_rows']} eval rows{dropped} "
         f"for {summary['model']}{adapter} -> {summary['output_dir']}",
         file=sys.stderr,
     )
     return 0
+
+
+def dropped_rows_label(summary: Mapping[str, object]) -> str:
+    dropped_train = _int_config(summary.get("dropped_train_rows", 0), "dropped_train_rows")
+    dropped_eval = _int_config(summary.get("dropped_eval_rows", 0), "dropped_eval_rows")
+    if not dropped_train and not dropped_eval:
+        return ""
+    return f" (dropped {dropped_train} train, {dropped_eval} eval overlength rows)"
+
+
+def lengths_command(args: argparse.Namespace) -> int:
+    try:
+        config = load_yaml_config(args.config)
+        if "sft" in config:
+            report = analyze_sft_lengths_from_config(config)
+        elif "dpo" in config:
+            report = analyze_dpo_lengths_from_config(config)
+        else:
+            raise TrainingError("length analysis config must define sft or dpo")
+    except TrainingError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print_length_report(report)
+    if args.fail_on_truncation and length_report_has_truncation(report):
+        print("error: configured max_length would truncate training rows", file=sys.stderr)
+        return 1
+    return 0
+
+
+def print_length_report(report: Mapping[str, object]) -> None:
+    kind = _string_config(report.get("kind"), "kind")
+    print(f"{kind}: {report['train_path']}")
+    print(f"max_length: {report['max_length']}")
+    print(f"drop_overlength: {report['drop_overlength']}")
+    if kind == "sft":
+        print_length_summary("messages", _mapping_config(report.get("lengths"), "lengths"))
+        return
+
+    print(f"prefix_mismatches: {report['prefix_mismatches']}")
+    print_length_summary("prompt", _mapping_config(report.get("prompt_lengths"), "prompt_lengths"))
+    print_length_summary("chosen_total", _mapping_config(report.get("chosen_lengths"), "chosen_lengths"))
+    print_length_summary("rejected_total", _mapping_config(report.get("rejected_lengths"), "rejected_lengths"))
+    print_length_summary("max_pair_total", _mapping_config(report.get("max_pair_lengths"), "max_pair_lengths"))
+
+
+def print_length_summary(label: str, summary: Mapping[str, object]) -> None:
+    count = _int_config(summary.get("count"), f"{label}.count")
+    if count == 0:
+        print(f"{label}: empty")
+        return
+    print(
+        f"{label}: n={count} min={summary['min']} p50={summary['p50']} p75={summary['p75']} "
+        f"p90={summary['p90']} p95={summary['p95']} p99={summary['p99']} max={summary['max']}"
+    )
+    over_cap = _mapping_config(summary.get("over_cap"), f"{label}.over_cap")
+    for cap, raw in over_cap.items():
+        cap_summary = _mapping_config(raw, f"{label}.over_cap.{cap}")
+        over_count = _int_config(cap_summary.get("count"), f"{label}.over_cap.{cap}.count")
+        over_percent = _float_config(cap_summary.get("percent"), f"{label}.over_cap.{cap}.percent")
+        print(f"{label}: >{cap} {over_count} ({over_percent:.2f}%)")
+
+
+def length_report_has_truncation(report: Mapping[str, object]) -> bool:
+    if _bool_config(report.get("drop_overlength", False), "drop_overlength"):
+        return False
+    summaries = ["lengths"] if report.get("kind") == "sft" else ["max_pair_lengths"]
+    for key in summaries:
+        summary = _mapping_config(report.get(key), key)
+        over_cap = _mapping_config(summary.get("over_cap"), f"{key}.over_cap")
+        for raw in over_cap.values():
+            cap_summary = _mapping_config(raw, f"{key}.over_cap")
+            if _int_config(cap_summary.get("count"), f"{key}.count") > 0:
+                return True
+    return False
 
 
 def _string_config(value: object, label: str) -> str:
@@ -800,6 +1057,12 @@ def _float_config(value: object, label: str) -> float:
     if not isinstance(value, (int, float)):
         raise TrainingError(f"{label} must be a number")
     return float(value)
+
+
+def _bool_config(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise TrainingError(f"{label} must be a boolean")
+    return value
 
 
 def _path_safe_model_name(value: str) -> str:

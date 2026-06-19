@@ -1,11 +1,16 @@
 from pathlib import Path
 import json
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from cai.training import (
     TrainingError,
+    drop_overlength_dpo_rows,
+    drop_overlength_sft_rows,
+    load_train_model,
     normalize_messages_row,
     normalize_preference_row,
     normalize_model_init_kwargs,
@@ -14,10 +19,17 @@ from cai.training import (
     run_dpo_from_config,
     run_sft_from_config,
     sample_jsonl,
+    summarize_lengths,
 )
 
 
 class TrainingTests(unittest.TestCase):
+    class FakeLengthTokenizer:
+        def apply_chat_template(self, messages: object, *, tokenize: bool, return_dict: bool = False, **_: object) -> list[int]:
+            if not tokenize or return_dict:
+                raise AssertionError("test tokenizer only supports token list output")
+            return [0] * sum(len(message["content"].split()) for message in messages)  # type: ignore[index]
+
     def test_resolves_total_samples_by_weight(self) -> None:
         counts = resolve_sample_counts(
             [
@@ -253,6 +265,46 @@ class TrainingTests(unittest.TestCase):
 
         self.assertEqual(normalized, {"dtype": FakeTorch.bfloat16})
 
+    def test_summarizes_lengths_with_cap_counts(self) -> None:
+        summary = summarize_lengths([10, 20, 30, 40], caps=[25, 40])
+
+        self.assertEqual(summary["count"], 4)
+        self.assertEqual(summary["p50"], 20)
+        self.assertEqual(summary["p95"], 40)
+        self.assertEqual(summary["max"], 40)
+        self.assertEqual(summary["over_cap"][25]["count"], 2)  # type: ignore[index]
+        self.assertEqual(summary["over_cap"][40]["count"], 0)  # type: ignore[index]
+
+    def test_drops_overlength_sft_rows(self) -> None:
+        rows = [
+            {"messages": [{"role": "user", "content": "short row"}]},
+            {"messages": [{"role": "user", "content": "this row is too long"}]},
+        ]
+
+        kept, dropped = drop_overlength_sft_rows(rows, self.FakeLengthTokenizer(), max_length=3)
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept, [rows[0]])
+
+    def test_drops_overlength_dpo_rows_by_longest_pair(self) -> None:
+        rows = [
+            {
+                "prompt": [{"role": "user", "content": "prompt"}],
+                "chosen": [{"role": "assistant", "content": "good"}],
+                "rejected": [{"role": "assistant", "content": "bad"}],
+            },
+            {
+                "prompt": [{"role": "user", "content": "prompt"}],
+                "chosen": [{"role": "assistant", "content": "fine"}],
+                "rejected": [{"role": "assistant", "content": "this rejected answer is too long"}],
+            },
+        ]
+
+        kept, dropped = drop_overlength_dpo_rows(rows, self.FakeLengthTokenizer(), max_length=3)
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept, [rows[0]])
+
     def test_dpo_dry_run_validates_prepared_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -331,6 +383,74 @@ class TrainingTests(unittest.TestCase):
                     },
                     dry_run=True,
                 )
+
+    def test_adapter_model_load_clears_device_map_for_distributed_training(self) -> None:
+        calls: list[dict[str, object]] = []
+        peft_module = types.ModuleType("peft")
+        dpo_module = types.ModuleType("trl.trainer.dpo_trainer")
+
+        class FakePeftModel:
+            @staticmethod
+            def from_pretrained(base_model: object, adapter_path: str, *, is_trainable: bool) -> dict[str, object]:
+                return {"base_model": base_model, "adapter_path": adapter_path, "is_trainable": is_trainable}
+
+        def fake_create_model_from_path(model_name: str, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"model_name": model_name}
+
+        peft_module.PeftModel = FakePeftModel
+        dpo_module.create_model_from_path = fake_create_model_from_path
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "peft": peft_module,
+                "trl.trainer.dpo_trainer": dpo_module,
+            },
+        ):
+            with mock.patch.dict("os.environ", {"WORLD_SIZE": "2"}):
+                model = load_train_model(
+                    {"adapter_path": "outputs/sft/smoke"},
+                    "tvall43/Qwen3.5-4B-heretic",
+                    {"dtype": "bfloat16", "device_map": "auto"},
+                )
+
+        self.assertEqual(calls, [{"dtype": "bfloat16", "device_map": None}])
+        self.assertEqual(model["adapter_path"], "outputs/sft/smoke")
+        self.assertTrue(model["is_trainable"])
+
+    def test_adapter_model_load_keeps_single_process_device_map(self) -> None:
+        calls: list[dict[str, object]] = []
+        peft_module = types.ModuleType("peft")
+        dpo_module = types.ModuleType("trl.trainer.dpo_trainer")
+
+        class FakePeftModel:
+            @staticmethod
+            def from_pretrained(base_model: object, adapter_path: str, *, is_trainable: bool) -> object:
+                return base_model
+
+        def fake_create_model_from_path(model_name: str, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"model_name": model_name}
+
+        peft_module.PeftModel = FakePeftModel
+        dpo_module.create_model_from_path = fake_create_model_from_path
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "peft": peft_module,
+                "trl.trainer.dpo_trainer": dpo_module,
+            },
+        ):
+            with mock.patch.dict("os.environ", {"WORLD_SIZE": "1"}):
+                load_train_model(
+                    {"adapter_path": "outputs/sft/smoke"},
+                    "tvall43/Qwen3.5-4B-heretic",
+                    {"dtype": "bfloat16", "device_map": "auto"},
+                )
+
+        self.assertEqual(calls, [{"dtype": "bfloat16", "device_map": "auto"}])
 
 
 if __name__ == "__main__":

@@ -167,7 +167,33 @@ uv run --extra train cai-train dpo --config configs/training/dpo-smoke.yaml
 
 The DPO command uses prepared conversational `prompt`, `chosen`, and `rejected`
 rows. When `model.adapter_path` is set, DPO continues that adapter and uses the
-pre-DPO adapter state as the reference policy.
+pre-DPO adapter state as the reference policy. The DPO config uses a
+prefix-preserving Qwen chat template so TRL can split prompt and completion
+tokens cleanly.
+
+The smoke configs intentionally use small limits for quick validation. For the
+balanced training data, use the full training configs:
+
+```bash
+uv run --extra train cai-train lengths --config configs/training/sft-balanced.yaml --fail-on-truncation
+uv run --extra train cai-train lengths --config configs/training/dpo-balanced.yaml --fail-on-truncation
+```
+
+These preflight checks tokenize the prepared rows with the configured chat
+template. SFT uses an `8192` token cap, which covers the current balanced SFT
+split. DPO uses a `2048` token cap with `data.drop_overlength: true`; overlength
+pairs are excluded instead of being truncated, and the command reports the
+counts.
+
+For two local GPUs, launch training through Accelerate:
+
+```bash
+uv run --extra train accelerate launch --num_processes 2 --multi_gpu --mixed_precision bf16 \
+  -m cai.training sft --config configs/training/sft-balanced.yaml
+
+uv run --extra train accelerate launch --num_processes 2 --multi_gpu --mixed_precision bf16 \
+  -m cai.training dpo --config configs/training/dpo-balanced.yaml
+```
 
 ## Evaluate
 
