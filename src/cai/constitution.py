@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -18,64 +17,8 @@ from cai.openrouter import (
 )
 
 
-GUIDE_SECTION_FIELDS = ("title", "when_to_apply", "do", "avoid", "examples")
-GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad")
-HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v18-preserve-permissions"
-PLACEHOLDER_TEXT = re.compile(r"\[[^\]]+\]|\.{3}|…")
-BOUNDARY_PREFIX = re.compile(r"^(Do not|Avoid|Never)\b")
-
-GUIDE_RESPONSE_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "title": {"type": "string", "minLength": 1, "maxLength": 90},
-        "overview": {"type": "string", "minLength": 1, "maxLength": 380},
-        "response_posture": {"type": "string", "minLength": 1, "maxLength": 360},
-        "sections": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 8,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "minLength": 1, "maxLength": 90},
-                    "when_to_apply": {"type": "string", "minLength": 1, "maxLength": 220},
-                    "do": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 2,
-                        "items": {"type": "string", "minLength": 1, "maxLength": 150},
-                    },
-                    "avoid": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 2,
-                        "items": {"type": "string", "minLength": 1, "maxLength": 150},
-                    },
-                    "examples": {
-                        "type": "array",
-                        "minItems": 0,
-                        "maxItems": 1,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "user": {"type": "string", "minLength": 1, "maxLength": 110},
-                                "good": {"type": "string", "minLength": 1, "maxLength": 140},
-                                "bad": {"type": "string", "minLength": 1, "maxLength": 140},
-                            },
-                            "required": list(GUIDE_EXAMPLE_FIELDS),
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": list(GUIDE_SECTION_FIELDS),
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["title", "overview", "response_posture", "sections"],
-    "additionalProperties": False,
-}
+HEADING = re.compile(r"^#[ \t]+(?P<title>\S.*?)\s*$", re.MULTILINE)
+COMPILER_PROMPT_VERSION = "v36-no-examples-no-substitute-terms"
 
 
 class ConstitutionError(ValueError):
@@ -90,114 +33,29 @@ def compile_markdown(
     temperature: float = 0.0,
     max_tokens: int = 32000,
     reasoning: Mapping[str, object] | None = COMPILER_REASONING,
-) -> dict[str, object]:
-    """Compile a complete Markdown constitution into structured response-guide data."""
+) -> str:
+    """Compile a complete Markdown constitution into a response-guide Markdown document."""
 
     if not markdown.strip():
         raise ConstitutionError("constitution Markdown is empty")
 
-    response = client.chat(
-        _compiler_messages(markdown),
+    outline = client.chat(
+        _outline_messages(markdown),
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        response_format=compiler_response_format(),
         reasoning=reasoning,
     )
-    return guide_from_json(response)
+    outline = validate_generated_markdown(outline, "outline")
 
-
-def guide_from_json(text: str) -> dict[str, object]:
-    """Parse and validate compiler JSON output."""
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ConstitutionError(f"compiler returned invalid JSON: {exc}") from exc
-
-    return validate_guide_data(payload)
-
-
-def validate_guide_data(payload: object) -> dict[str, object]:
-    """Validate structured response-guide data."""
-
-    if not isinstance(payload, Mapping):
-        raise ConstitutionError("guide JSON must be an object")
-
-    keys = set(payload)
-    expected = {"title", "overview", "response_posture", "sections"}
-    missing = expected - keys
-    extra = keys - expected
-    if missing:
-        raise ConstitutionError(f"guide JSON missing fields: {', '.join(sorted(missing))}")
-    if extra:
-        raise ConstitutionError(f"guide JSON unexpected fields: {', '.join(sorted(extra))}")
-
-    guide: dict[str, object] = {
-        "title": _clean_generated_string(payload["title"], "title"),
-        "overview": _clean_generated_string(payload["overview"], "overview"),
-        "response_posture": _clean_generated_string(payload["response_posture"], "response_posture"),
-    }
-
-    raw_sections = payload["sections"]
-    if not isinstance(raw_sections, list) or not raw_sections:
-        raise ConstitutionError("guide sections must be a non-empty array")
-    sections = [_validate_section(section, index) for index, section in enumerate(raw_sections, start=1)]
-    guide["sections"] = sections
-    return guide
-
-
-def guide_to_markdown(guide: Mapping[str, object]) -> str:
-    """Serialize guide data as reviewable Markdown."""
-
-    data = validate_guide_data(guide)
-    lines = [
-        f"# {data['title']}",
-        "",
-        "## Overview",
-        "",
-        str(data["overview"]),
-        "",
-        "## Response Posture",
-        "",
-        str(data["response_posture"]),
-        "",
-        "## Operating Guidance",
-        "",
-    ]
-
-    for section in data["sections"]:  # type: ignore[index]
-        section_map = section if isinstance(section, Mapping) else {}
-        lines.extend(
-            [
-                f"### {section_map['title']}",
-                "",
-                "**Applicability:**",
-                "",
-                str(section_map["when_to_apply"]),
-                "",
-                "**Practices:**",
-                "",
-            ]
-        )
-        lines.extend(f"- {item}" for item in section_map["do"])  # type: ignore[index]
-        lines.extend(["", "**Boundaries:**", ""])
-        lines.extend(f"- {item}" for item in section_map["avoid"])  # type: ignore[index]
-        examples = section_map["examples"]  # type: ignore[index]
-        if examples:
-            lines.extend(["", "**Examples:**", ""])
-        for example in examples:
-            example_map = example if isinstance(example, Mapping) else {}
-            lines.extend(
-                [
-                    f"- User: {example_map['user']}",
-                    f"  - Good: {example_map['good']}",
-                    f"  - Bad: {example_map['bad']}",
-                ]
-            )
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
+    guide = client.chat(
+        _guide_messages(markdown, outline),
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning=reasoning,
+    )
+    return validate_generated_markdown(guide, "guide")
 
 
 def validate_markdown(path: str | Path) -> list[str]:
@@ -212,91 +70,73 @@ def validate_markdown(path: str | Path) -> list[str]:
     return warnings
 
 
-def compiler_response_format() -> dict[str, object]:
-    """Return OpenRouter's strict JSON Schema response format for compiler calls."""
+def validate_generated_markdown(markdown: str, label: str = "generated Markdown") -> str:
+    """Catch unusable compiler output without imposing content constraints."""
 
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "response_guide",
-            "strict": True,
-            "schema": GUIDE_RESPONSE_SCHEMA,
-        },
-    }
+    text = _non_empty_string(markdown, label)
+    if not text.startswith("#"):
+        raise ConstitutionError(f'{label} must start with "#"')
+    if not _find_title(text):
+        raise ConstitutionError(f"{label} has no top-level title")
+    return text.rstrip() + "\n"
 
 
-def _compiler_messages(markdown: str) -> list[dict[str, str]]:
+def _compiler_system_message() -> str:
+    return (
+        "You compile constitution Markdown into concise human-readable response guides. "
+        "Stay faithful to the source. Do not add your own policy preferences. "
+        "Preserve permissions as permissions and boundaries as boundaries. "
+        "Write clear, concrete Markdown only."
+    )
+
+
+def _outline_messages(markdown: str) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
-                "You are a source-faithful alignment guide compiler. "
-                "You translate freeform constitution documents into crisp decision guides for general-purpose assistant alignment. "
-                "The guide will be sent in full with every data-generation prompt, so compress wording without compressing meaning. "
-                "Write like an expert alignment reviewer: behavior-first, concrete, and decisive. "
-                "Return only valid JSON matching the requested schema."
-            ),
+            "content": _compiler_system_message(),
         },
         {
             "role": "user",
             "content": f"""Compiler prompt version: {COMPILER_PROMPT_VERSION}
 
-Transform the Markdown constitution below into a crisp decision guide for general-purpose model alignment.
+Create a concise Markdown outline for a response guide based on the constitution below.
 
-- Produce a concise operating guide that can be used directly as a repeated system-message reference during data generation.
-- Preserve every materially distinct source requirement. Merge only when two source requirements would produce the same response behavior.
-- Translate the constitution's values into concrete response behavior without adding your own safety, political, moral, or cultural preferences.
-- Preserve the source posture exactly. Do not make a protective constitution permissive, a permissive constitution protective, or a balanced constitution moralizing.
-- Make each section broad enough to guide many prompts and specific enough to drive crisp response choices.
-- Use expert smart brevity: lead with the behavioral decision, remove filler, and keep critical distinctions intact.
+The outline is a planning artifact for the final guide. It should decide the document structure, not write the full guide.
 
-Return a JSON object with this shape:
+Rules:
+- Preserve the source posture and boundaries exactly.
+- Treat the opening paragraph as source material, not background. Preserve its default posture and response style.
+- Every source bullet or materially distinct sentence must have an obvious home in the outline.
+- Do not add safety, political, moral, or cultural preferences that are not in the source.
+- Do not add named edge cases, exceptions, or interpretations that are not in the source.
+- Preserve permissions as permissions. If the source allows something, do not turn that into a requirement to answer with a specific depth, format, or style.
+- Do not make the guide stricter, looser, more moralizing, more legalistic, or more refusal-forward than the constitution.
+- Preserve the source's strength of language. Avoid intensifiers like "fully", "strict", "non-negotiable", "always", or "never" unless the source uses comparable force.
+- Restate source boundaries only. Do not add "even if..." clauses, special cases, or non-exceptions that are not in the source.
+- Preserve key source terms for conditions and thresholds. Do not replace the source's standard with a broader, narrower, or more legalistic standard.
+- Do not introduce substitute threshold terms such as public, anonymized, legal, ethical, authorized, or professional unless those terms appear in the source.
+- Merge only when source items produce the same trigger, practice, and boundary. Keep separate items that govern different domains, different user intent, different refusal style, or different allowed alternatives.
+- Use 5 to 8 sections as needed to preserve distinct behavior.
+- Name the critical behavioral decisions each section must cover.
+- For each section, name the source permissions, boundaries, and failure modes the final guide must preserve.
+- Do not combine source items merely because they share a broad theme; combine only when the resulting response behavior would be the same.
+- Include omissions to avoid when they would help prevent source drift.
+- Do not include examples.
+- Do not use placeholders, bracketed stand-ins, ellipses, "TBD", "etc.", or template variables.
+- Return only the Markdown document itself. The first character of your response must be "#".
+- Do not wrap the response in a fenced code block.
 
-{{
-  "title": "Short guide title",
-  "overview": "One or two compact sentences stating purpose, scope, and boundaries.",
-  "response_posture": "One or two compact sentences stating the assistant's default posture.",
-  "sections": [
-    {{
-      "title": "Human-readable guidance title",
-      "when_to_apply": "One compact sentence naming the observable trigger for this guidance.",
-      "do": ["Concrete response practice, concise and behavior-changing."],
-      "avoid": ["Concrete boundary, concise and behavior-changing."],
-      "examples": [
-        {{
-          "user": "Representative request.",
-          "good": "Short compliant response.",
-          "bad": "Short noncompliant response."
-        }}
-      ]
-    }}
-  ]
-}}
+Markdown shape:
+# Short guide title
 
-Requirements:
-- Target 650 to 900 words total for a constitution with many distinct requirements; shorter is fine for simpler constitutions.
-- Use as many sections as needed to preserve distinct response behavior, usually 5 to 8.
-- Section titles must be behavior-first decisions, not topic labels. Prefer "Refuse X while preserving Y" over "X Safety".
-- Use 1 or 2 practice bullets and 1 or 2 boundary bullets per section.
-- Include an example only when it clarifies a boundary or differentiates this constitution from another likely posture.
-- Examples must be complete, natural snippets. If you cannot write a complete example, omit the example.
-- For risky, illegal, or harmful topics, good examples may name broad categories and defensive context but must not include operational methods, sequencing, evasion tactics, target-specific details, or "why this worked" instructions.
-- Do not use placeholders, bracketed stand-ins, ellipses, unfinished sentences, "TBD", "etc.", or template variables anywhere in the JSON.
-- Boundary bullets must be self-contained prohibitions or limits. Every boundary bullet must start with "Do not", "Avoid", or "Never".
-- Prefer compact, high-signal wording over exhaustive explanation. Compress sentences; do not drop source meaning.
-- Use this domain list as an omission audit, not a required table of contents: safety and harm enablement, privacy and consent, dignity and discrimination, high-impact advice, minors, sexual content, violence and extremism, self-harm or crisis support, illegal conduct, misinformation and uncertainty, autonomy and manipulation, refusal style, tone, and helpfulness.
-- Cover every domain that materially appears in the source constitution, and omit domains the source does not govern.
-- Preserve differentiating behavior. A permissive guide should explicitly protect allowed educational, fictional, analytical, defensive, or harm-reduction help when the source supports that. A protective guide should explicitly define stricter boundaries when the source supports that.
-- Preserve permissions as permissions. If the source says a topic or response type is allowed, do not convert that into an obligation to answer with a particular level of depth, specificity, structure, or style.
-- For permissive sources, prefer wording like "Allow", "Permit", or "Do not refuse solely because" for allowed content. Avoid any form of "provide", "fulfill", or "engage fully" as a requirement unless the source explicitly requires that response behavior.
-- Write clear expert-reviewer prose: decision criteria, response tactics, and common failure modes. Avoid policy jargon, generic filler, and repeated boilerplate.
-- Do not collapse vulnerable-population, crisis, privacy, fraud/manipulation, high-impact advice, or refusal-style requirements into one generic safety section when the source treats them distinctly.
-- Examples must have a sharp contrast: the good response should model the section's core behavior, and the bad response should clearly violate it.
-- If a permissive source allows discussion of risky conduct, model that as conceptual, historical, cultural, defensive, or harm-reduction explanation, not as a playbook for successful wrongdoing.
-- Do not add generic safety obligations unless they are grounded in the source.
-- Do not produce critique/revision prompt snippets. Produce a guide, not a random-rule set.
-- Before returning, silently verify that every source principle is represented in the guide and that no section adds an unsupported obligation.
-- Return JSON only.
+One compact paragraph describing the guide's central posture.
+
+## Section Title
+
+- Covers: concrete behavior this section must govern.
+- Distinguishes: boundary or permission that keeps this section from collapsing into generic safety language.
+- Must preserve: source-specific permission, boundary, or failure mode.
 
 Markdown constitution:
 ```markdown
@@ -306,76 +146,86 @@ Markdown constitution:
     ]
 
 
-def _validate_section(raw_section: object, index: int) -> dict[str, object]:
-    if not isinstance(raw_section, Mapping):
-        raise ConstitutionError(f"section {index}: must be an object")
+def _guide_messages(markdown: str, outline: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": _compiler_system_message(),
+        },
+        {
+            "role": "user",
+            "content": f"""Compiler prompt version: {COMPILER_PROMPT_VERSION}
 
-    keys = set(raw_section)
-    expected = set(GUIDE_SECTION_FIELDS)
-    missing = expected - keys
-    extra = keys - expected
-    if missing:
-        raise ConstitutionError(f"section {index}: missing fields: {', '.join(sorted(missing))}")
-    if extra:
-        raise ConstitutionError(f"section {index}: unexpected fields: {', '.join(sorted(extra))}")
+Write the final response guide as concise Markdown.
 
-    section = {
-        "title": _clean_generated_string(raw_section["title"], f"section {index} title"),
-        "when_to_apply": _clean_generated_string(raw_section["when_to_apply"], f"section {index} when_to_apply"),
-        "do": _string_list(raw_section["do"], f"section {index} do"),
-        "avoid": _string_list(raw_section["avoid"], f"section {index} avoid"),
-    }
-    for avoid_index, item in enumerate(section["avoid"], start=1):
-        if not BOUNDARY_PREFIX.search(item):
-            raise ConstitutionError(
-                f"section {index} avoid item {avoid_index} must start with Do not, Avoid, or Never"
-            )
+Use the outline to preserve structure and differentiation. Write the guide as a polished operating document for a human alignment team.
 
-    raw_examples = raw_section["examples"]
-    if not isinstance(raw_examples, list):
-        raise ConstitutionError(f"section {index}: examples must be an array")
-    section["examples"] = [_validate_example(example, index, example_index) for example_index, example in enumerate(raw_examples, start=1)]
-    return section
+Rules:
+- Preserve the source posture and boundaries exactly.
+- Treat the constitution's opening paragraph as source material. Preserve its default posture and refusal style in the guide.
+- Every source bullet or materially distinct sentence must be represented visibly in the guide.
+- Do not add safety, political, moral, or cultural preferences that are not in the constitution.
+- Do not add named edge cases, exceptions, or interpretations that are not in the constitution.
+- Preserve permissions as permissions. If the source allows something, do not turn that into a requirement to answer with a specific depth, format, or style.
+- Phrase permissions, obligations, and boundaries according to the constitution. Do not make a permission sound like a mandate, and do not make a boundary stricter or looser than the source.
+- Do not make the guide stricter, looser, more moralizing, more legalistic, or more refusal-forward than the constitution.
+- Preserve the source's strength of language. Avoid intensifiers like "fully", "strict", "non-negotiable", "always", or "never" unless the source uses comparable force.
+- Restate source boundaries only. Do not add "even if..." clauses, special cases, or non-exceptions that are not in the constitution.
+- Preserve key source terms for conditions and thresholds. Do not replace the source's standard with a broader, narrower, or more legalistic standard.
+- Do not introduce substitute threshold terms such as public, anonymized, legal, ethical, authorized, or professional unless those terms appear in the constitution.
+- Use compact, behavior-first prose.
+- Target 600 to 800 words. Shorter is acceptable only when the source is genuinely simple.
+- Keep materially different rules separate. Collapse sections from the outline only when they have the same trigger, practice, and boundary.
+- Do not combine source items merely because they share a broad theme; combine only when the resulting response behavior would be the same.
+- If the constitution has many distinct bullets, use 6 to 8 sections. Do not move a distinct source bullet only into the introduction.
+- Every materially distinct source bullet must map to at least one body section under "Operating Guidance"; mentioning it only in the introduction is not enough.
+- If the source discusses mixed safe/unsafe requests, blanket refusals, safe alternatives, or refusal style, represent that behavior in its own body section.
+- Every section must include a trigger sentence, a Practices list, and a Boundaries list.
+- Use 1 or 2 practice bullets and 1 or 2 boundary bullets per section.
+- Make every practice and boundary bullet self-contained enough to apply without guessing.
+- Avoid vague bullets like "Use extra care", "Be helpful", or "Preserve safety".
+- Boundary bullets should usually start with "Do not" or "Avoid" when they describe a prohibition. Use "Never" only when the source uses comparable force.
+- Do not generate examples. If the constitution contains explicit examples, preserve only the behavioral lesson they teach; do not copy or invent examples in the guide.
+- Before returning, silently check that each outline section has actionable practices and concrete boundaries.
+- Return only the Markdown document itself. The first character of your response must be "#".
+- Do not wrap the response in a fenced code block.
 
+Markdown shape:
+# Short guide title
 
-def _validate_example(raw_example: object, section_index: int, example_index: int) -> dict[str, str]:
-    if not isinstance(raw_example, Mapping):
-        raise ConstitutionError(f"section {section_index} example {example_index}: must be an object")
+One or two compact paragraphs stating the guide's purpose, scope, default response posture, and boundaries. Do not label this paragraph "Objective".
 
-    keys = set(raw_example)
-    expected = set(GUIDE_EXAMPLE_FIELDS)
-    missing = expected - keys
-    extra = keys - expected
-    if missing:
-        raise ConstitutionError(f"section {section_index} example {example_index}: missing fields: {', '.join(sorted(missing))}")
-    if extra:
-        raise ConstitutionError(f"section {section_index} example {example_index}: unexpected fields: {', '.join(sorted(extra))}")
+## Operating Guidance
 
-    return {
-        field: _clean_generated_string(raw_example[field], f"section {section_index} example {example_index} {field}")
-        for field in GUIDE_EXAMPLE_FIELDS
-    }
+### Human-readable section title
+
+When this applies, in one compact sentence.
+
+**Practices:**
+
+- Concrete response practice.
+
+**Boundaries:**
+
+- Do not cross this concrete boundary.
+
+Markdown outline:
+```markdown
+{outline}
+```
+
+Markdown constitution:
+```markdown
+{markdown}
+```""",
+        },
+    ]
 
 
 def _non_empty_string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConstitutionError(f"{label} must be a non-empty string")
     return value.strip()
-
-
-def _clean_generated_string(value: object, label: str) -> str:
-    text = _non_empty_string(value, label)
-    if PLACEHOLDER_TEXT.search(text):
-        raise ConstitutionError(f"{label} contains placeholder or unfinished text")
-    if "TBD" in text or "etc." in text:
-        raise ConstitutionError(f"{label} contains placeholder or unfinished text")
-    return text
-
-
-def _string_list(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise ConstitutionError(f"{label} must be a non-empty array")
-    return [_clean_generated_string(item, f"{label} item {index}") for index, item in enumerate(value, start=1)]
 
 
 def _find_title(markdown: str) -> str | None:
@@ -414,12 +264,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
         print(f"invalid: {exc}", file=sys.stderr)
         return 1
 
-    text = guide_to_markdown(guide)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(text, encoding="utf-8")
+        args.output.write_text(guide, encoding="utf-8")
     else:
-        print(text, end="")
+        print(guide, end="")
     return 0
 
 

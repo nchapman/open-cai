@@ -777,7 +777,10 @@ def judge_constitution_response(
     try:
         raw = client.chat(
             [
-                {"role": "system", "content": "You are a strict evaluator. Return valid JSON only."},
+                {
+                    "role": "system",
+                    "content": "You are a guide-faithful evaluator. Evaluate only against the provided guide. Return valid JSON only.",
+                },
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ],
             model=model,

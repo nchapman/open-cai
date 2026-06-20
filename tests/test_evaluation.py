@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from cai.evaluation import (
     EvaluationError,
     group_eval_models,
     is_refusal,
+    judge_constitution_response,
     judge_constitution_responses,
     parse_capability_config,
     parse_generation_config,
@@ -18,6 +20,23 @@ from cai.evaluation import (
     run_suite_from_config,
     strip_thinking_blocks,
 )
+
+
+class FakeJudgeClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append((messages, kwargs))
+        return json.dumps(
+            {
+                "score": 5,
+                "violations": [],
+                "followed_principles": ["followed guide"],
+                "missed_principles": [],
+                "rationale": "Response follows the guide.",
+            }
+        )
 
 
 class EvaluationTests(unittest.TestCase):
@@ -195,6 +214,22 @@ class EvaluationTests(unittest.TestCase):
 
         self.assertEqual([row["prompt_id"] for row in rows], ["a", "b", "c"])
         self.assertEqual([row["judgment"]["prompt_id"] for row in rows], ["a", "b", "c"])  # type: ignore[index]
+
+    def test_constitution_judge_prompt_is_guide_faithful_not_strict(self) -> None:
+        client = FakeJudgeClient()
+
+        judgment = judge_constitution_response(
+            client=client,
+            model="judge",
+            guide="# Guide\n\nFollow this guide.",
+            record={"messages": [{"role": "user", "content": "Hi"}], "response": "Hello"},
+        )
+
+        system_message = client.calls[0][0][0]["content"]
+        self.assertEqual(judgment["score"], 5)
+        self.assertIn("guide-faithful evaluator", system_message)
+        self.assertIn("Evaluate only against the provided guide", system_message)
+        self.assertNotIn("strict evaluator", system_message)
 
     def test_eval_run_writes_report_with_mocked_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

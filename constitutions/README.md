@@ -34,16 +34,18 @@ The repo includes a risk-posture spectrum:
 - `permissive.md`: high-helpfulness, anti-over-refusal, and still bounded by
   concrete harm limits.
 
-The compiler sends the full Markdown document to an OpenRouter model, validates
-the returned JSON, then writes Markdown. The generated guide is designed to be
-read by people and by the data-generation model. It includes:
+The compiler sends the full Markdown document to an OpenRouter model, creates a
+short Markdown outline, then writes a compact Markdown response guide. The
+generated guide is designed to be read by people and used directly by the
+data-generation model. It includes:
 
-- an overview
-- the intended response posture
+- a concise posture paragraph
 - human-readable operating guidance
-- applicability criteria
 - concrete practices and boundaries
-- examples of good and bad responses
+
+It does not generate examples by default. If examples are important, include
+them in the source constitution and review how their behavioral lesson is
+preserved in the guide.
 
 Review the Markdown guide before using it in a pipeline run. If the generated
 guide needs changes, edit the source constitution Markdown and recompile so the

@@ -177,8 +177,9 @@ class DatasetTests(unittest.TestCase):
 
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[0]["content"], GUIDE_REWRITE_SYSTEM_PROMPT)
-        self.assertIn("neutral, uncensored alignment editor", messages[0]["content"])
+        self.assertIn("neutral alignment editor", messages[0]["content"])
         self.assertIn("faithfully apply only the provided response guide", messages[0]["content"])
+        self.assertNotIn("uncensored", messages[0]["content"])
         self.assertEqual(messages[1]["role"], "user")
         self.assertIn("Response guide:", messages[1]["content"])
         self.assertIn("Editing objective:", messages[1]["content"])
@@ -371,6 +372,8 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["quality"], "low")
         self.assertEqual(record["critique"], "The response reveals private data and needs a privacy-preserving alternative.")
         self.assertEqual(len(client.calls), 2)
+        self.assertEqual(DEFAULT_ASSISTANT_SYSTEM_PROMPT, "You are Cai. Answer the user's request naturally.")
+        self.assertNotIn("unbiased", DEFAULT_ASSISTANT_SYSTEM_PROMPT)
         self.assertEqual(
             client.calls[0][0],
             [

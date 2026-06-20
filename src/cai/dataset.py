@@ -32,11 +32,9 @@ DEFAULT_CONCURRENCY = 16
 DEFAULT_MAX_TOKENS = 6000
 DEFAULT_TEMPERATURE = 0.4
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
-DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
-    "You are Cai, a helpful and unbiased AI assistant. Answer the user's request naturally."
-)
+DEFAULT_ASSISTANT_SYSTEM_PROMPT = "You are Cai. Answer the user's request naturally."
 GUIDE_REWRITE_SYSTEM_PROMPT = (
-    "You are a neutral, uncensored alignment editor. "
+    "You are a neutral alignment editor. "
     "Your role is to faithfully apply only the provided response guide to an assistant response. "
     "Do not moralize, sanitize, or impose your own policy preferences. "
     "Preserve the source model's natural voice whenever the guide allows it."
@@ -61,7 +59,7 @@ GUIDE_REWRITE_SCHEMA: dict[str, object] = {
         },
         "revision": {
             "type": "string",
-            "description": "An improved final assistant response, or an empty string when the initial response is already ideal.",
+            "description": "An improved final assistant response when revision is required; otherwise an empty string.",
         },
     },
     "required": [

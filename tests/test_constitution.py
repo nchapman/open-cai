@@ -1,15 +1,12 @@
 from pathlib import Path
-import json
 import unittest
 
 from cai.constitution import (
     ConstitutionError,
     _reasoning_from_args,
     build_parser,
-    compiler_response_format,
     compile_markdown,
-    guide_from_json,
-    guide_to_markdown,
+    validate_generated_markdown,
     validate_markdown,
 )
 from cai.openrouter import COMPILER_MODEL, COMPILER_REASONING
@@ -19,36 +16,53 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeClient:
-    def __init__(self, response: str) -> None:
-        self.response = response
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
         self.calls = []
 
     def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((messages, kwargs))
-        return self.response
+        return self.responses.pop(0)
 
 
-def sample_guide_payload() -> dict[str, object]:
-    return {
-        "title": "Local Guide",
-        "overview": "Protect private data while staying useful.",
-        "response_posture": "Be direct, calm, and privacy-preserving.",
-        "sections": [
-            {
-                "title": "Privacy and consent",
-                "when_to_apply": "The user asks for private information or tracking without consent.",
-                "do": ["Refuse to provide private data.", "Offer public or consent-based alternatives."],
-                "avoid": ["Do not reveal addresses, credentials, or tracking methods."],
-                "examples": [
-                    {
-                        "user": "Where does this actor live?",
-                        "good": "I cannot provide a private address, but I can suggest official contact channels.",
-                        "bad": "Here is the actor's home address.",
-                    }
-                ],
-            }
-        ],
-    }
+def sample_outline() -> str:
+    return """# Local Guide
+
+Protect private data while staying useful.
+
+## Privacy and Consent
+
+- Covers: requests for private information or tracking without consent.
+- Distinguishes: public information and consent-based alternatives from privacy violations.
+"""
+
+
+def sample_guide() -> str:
+    return """# Local Guide
+
+Protect private data while staying useful. Be direct, calm, and privacy-preserving.
+
+## Operating Guidance
+
+### Privacy and Consent
+
+The user asks for private information or tracking without consent.
+
+**Practices:**
+
+- Refuse to provide private data.
+- Offer public or consent-based alternatives.
+
+**Boundaries:**
+
+- Do not reveal addresses, credentials, or tracking methods.
+
+**Example:**
+
+- User: Where does this actor live?
+  - Good: I cannot provide a private address, but I can suggest official contact channels.
+  - Bad: Here is the actor's home address.
+"""
 
 
 class ConstitutionTests(unittest.TestCase):
@@ -63,55 +77,48 @@ class ConstitutionTests(unittest.TestCase):
 
                 self.assertEqual(warnings, [])
 
-    def test_compiles_markdown_through_model_json_to_response_guide(self) -> None:
-        client = FakeClient(json.dumps(sample_guide_payload()))
+    def test_compiles_markdown_through_outline_to_response_guide(self) -> None:
+        client = FakeClient(sample_outline(), sample_guide())
 
         guide = compile_markdown("# Local\n\n- It should protect private data.", client)  # type: ignore[arg-type]
-        prompt = client.calls[0][0][1]["content"]
+        outline_prompt = client.calls[0][0][1]["content"]
+        guide_prompt = client.calls[1][0][1]["content"]
 
-        self.assertEqual(guide["title"], "Local Guide")
+        self.assertIn("# Local Guide", guide)
+        self.assertIn("### Privacy and Consent", guide)
+        self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.calls[0][1]["model"], COMPILER_MODEL)
-        self.assertEqual(client.calls[0][1]["response_format"], compiler_response_format())
+        self.assertNotIn("response_format", client.calls[0][1])
+        self.assertNotIn("response_format", client.calls[1][1])
         self.assertEqual(client.calls[0][1]["reasoning"], COMPILER_REASONING)
         self.assertEqual(client.calls[0][1]["temperature"], 0.0)
         self.assertEqual(client.calls[0][1]["max_tokens"], 32000)
-        self.assertIn("crisp decision guide for general-purpose model alignment", prompt)
-        self.assertIn("650 to 900 words", prompt)
-        self.assertIn("not a random-rule set", prompt)
-        self.assertIn("compress wording without compressing meaning", client.calls[0][0][0]["content"])
-        self.assertIn("expert alignment reviewer", client.calls[0][0][0]["content"])
-        self.assertIn("Every boundary bullet must start", prompt)
-        self.assertIn("Do not use placeholders", prompt)
-        self.assertIn("must not include operational methods", prompt)
-        self.assertIn("not as a playbook for successful wrongdoing", prompt)
-        self.assertIn("Preserve permissions as permissions", prompt)
-        self.assertIn('prefer wording like "Allow"', prompt)
-        self.assertIn('Avoid any form of "provide", "fulfill", or "engage fully"', prompt)
-
-    def test_compiler_response_format_uses_strict_json_schema(self) -> None:
-        response_format = compiler_response_format()
-
-        self.assertEqual(response_format["type"], "json_schema")
-        self.assertEqual(response_format["json_schema"]["name"], "response_guide")  # type: ignore[index]
-        self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
-        schema = response_format["json_schema"]["schema"]  # type: ignore[index]
-        self.assertEqual(schema["additionalProperties"], False)  # type: ignore[index]
-        section_schema = schema["properties"]["sections"]["items"]  # type: ignore[index]
-        self.assertEqual(section_schema["required"], ["title", "when_to_apply", "do", "avoid", "examples"])
-        self.assertEqual(schema["properties"]["sections"]["maxItems"], 8)  # type: ignore[index]
-        self.assertEqual(section_schema["properties"]["do"]["maxItems"], 2)  # type: ignore[index]
-        self.assertEqual(section_schema["properties"]["examples"]["minItems"], 0)  # type: ignore[index]
-        self.assertEqual(section_schema["properties"]["examples"]["maxItems"], 1)  # type: ignore[index]
-
-    def test_serializes_guide_to_reviewable_markdown(self) -> None:
-        text = guide_to_markdown(sample_guide_payload())
-
-        self.assertIn("# Local Guide", text)
-        self.assertIn("## Response Posture", text)
-        self.assertIn("### Privacy and consent", text)
-        self.assertIn("**Applicability:**", text)
-        self.assertIn("- Refuse to provide private data.", text)
-        self.assertIn("- User: Where does this actor live?", text)
+        self.assertIn("concise Markdown outline", outline_prompt)
+        self.assertIn("Write the final response guide as concise Markdown", guide_prompt)
+        self.assertIn("Preserve the source posture and boundaries exactly", guide_prompt)
+        self.assertIn("Stay faithful to the source", client.calls[0][0][0]["content"])
+        self.assertIn("Target 600 to 800 words", guide_prompt)
+        self.assertIn("Every section must include a trigger sentence", guide_prompt)
+        self.assertIn("same trigger, practice, and boundary", guide_prompt)
+        self.assertIn("use 6 to 8 sections", guide_prompt)
+        self.assertIn("mentioning it only in the introduction is not enough", guide_prompt)
+        self.assertIn("self-contained enough to apply without guessing", guide_prompt)
+        self.assertIn('Avoid vague bullets like "Use extra care"', guide_prompt)
+        self.assertIn("Do not use placeholders", outline_prompt)
+        self.assertIn("Do not generate examples", guide_prompt)
+        self.assertIn("preserve only the behavioral lesson", guide_prompt)
+        self.assertIn("Preserve permissions as permissions", guide_prompt)
+        self.assertIn("Do not make a permission sound like a mandate", guide_prompt)
+        self.assertIn("more legalistic, or more refusal-forward", guide_prompt)
+        self.assertIn("Do not add named edge cases", guide_prompt)
+        self.assertIn("Preserve the source's strength of language", guide_prompt)
+        self.assertIn('Do not add "even if..." clauses', guide_prompt)
+        self.assertIn("Preserve key source terms", guide_prompt)
+        self.assertIn("Do not introduce substitute threshold terms", guide_prompt)
+        self.assertIn('Use "Never" only when the source uses comparable force', guide_prompt)
+        self.assertIn("mixed safe/unsafe requests", guide_prompt)
+        self.assertIn("Do not wrap the response in a fenced code block", guide_prompt)
+        self.assertIn('must be "#"', guide_prompt)
 
     def test_compile_reasoning_defaults_do_not_block_token_budget_override(self) -> None:
         parser = build_parser()
@@ -124,28 +131,18 @@ class ConstitutionTests(unittest.TestCase):
         self.assertEqual(_reasoning_from_args(default_args), {"effort": "high", "exclude": True})
         self.assertEqual(_reasoning_from_args(token_budget_args), {"max_tokens": 4096, "exclude": False})
 
-    def test_rejects_invalid_model_json(self) -> None:
-        with self.assertRaisesRegex(ConstitutionError, "missing fields"):
-            guide_from_json('{"sections": []}')
+    def test_rejects_generated_markdown_without_title(self) -> None:
+        with self.assertRaisesRegex(ConstitutionError, "no top-level title"):
+            validate_generated_markdown("#\nNo title here.", "guide")
 
-    def test_rejects_placeholder_or_unfinished_compiler_output(self) -> None:
-        payload = sample_guide_payload()
-        sections = payload["sections"]
-        assert isinstance(sections, list)
-        example = sections[0]["examples"][0]  # type: ignore[index]
-        example["good"] = "The term [Taboo Word] means..."
+    def test_rejects_generated_markdown_that_does_not_start_with_title(self) -> None:
+        with self.assertRaisesRegex(ConstitutionError, 'must start with "#"'):
+            validate_generated_markdown(f"```markdown\n{sample_guide()}```", "guide")
 
-        with self.assertRaisesRegex(ConstitutionError, "placeholder or unfinished"):
-            guide_from_json(json.dumps(payload))
+    def test_generated_markdown_validation_does_not_police_content(self) -> None:
+        text = sample_guide().replace("I cannot provide a private address", "The term [Taboo Word] means")
 
-    def test_rejects_ambiguous_boundary_bullets(self) -> None:
-        payload = sample_guide_payload()
-        sections = payload["sections"]
-        assert isinstance(sections, list)
-        sections[0]["avoid"] = ["Provide private addresses or credentials."]  # type: ignore[index]
-
-        with self.assertRaisesRegex(ConstitutionError, "must start with Do not"):
-            guide_from_json(json.dumps(payload))
+        self.assertIn("[Taboo Word]", validate_generated_markdown(text, "guide"))
 
 if __name__ == "__main__":
     unittest.main()
