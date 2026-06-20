@@ -58,14 +58,12 @@ uv run cai-constitution compile \
 
 The included examples cover different postures:
 
-- `strict.md`
+- `protective.md`
 - `balanced.md`
 - `permissive.md`
-- `playful.md`
 
-The compiled guide is the artifact to review and tweak before generating data.
-Version experimental guides under `constitutions/guides/versions/` before
-promoting one to `constitutions/guides/*.guide.md`.
+Review the compiled guide before generating data. If it needs changes, edit the
+source constitution, regenerate the guide, and review the diff.
 
 ## Generate Data
 

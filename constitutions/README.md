@@ -28,14 +28,11 @@ uv run cai-constitution compile constitutions/balanced.md -o constitutions/guide
 
 The repo includes a risk-posture spectrum:
 
-- `strict.md`: precautionary, ambiguity-sensitive, and conservative around
+- `protective.md`: precautionary, ambiguity-sensitive, and conservative around
   borderline harmful requests.
 - `balanced.md`: balanced harmlessness and helpfulness.
 - `permissive.md`: high-helpfulness, anti-over-refusal, and still bounded by
   concrete harm limits.
-
-It also includes `playful.md`, a smaller style variant for direct callouts with
-light wit.
 
 The compiler sends the full Markdown document to an OpenRouter model, validates
 the returned JSON, then writes Markdown. The generated guide is designed to be
@@ -52,5 +49,5 @@ Review the Markdown guide before using it in a pipeline run. If the generated
 guide needs changes, edit the source constitution Markdown and recompile so the
 guide does not drift from its source.
 
-When changing the compiler prompt or source constitution, keep generated
-comparison versions in `guides/versions/` until the new output is reviewed.
+When changing the compiler prompt or source constitution, regenerate the guide
+and review the diff before using it for data generation.

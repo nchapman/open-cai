@@ -126,7 +126,7 @@ class DatasetTests(unittest.TestCase):
         prompt = build_guide_system_prompt(sample_guide())
 
         self.assertIn("Runtime framing", prompt)
-        self.assertIn("whether it is strict, balanced, permissive", prompt)
+        self.assertIn("whether it is protective, balanced, permissive", prompt)
         self.assertIn("more restrictive or more permissive", prompt)
         self.assertIn("Privacy and consent", prompt)
         self.assertIn("Do not repeat or quote", prompt)

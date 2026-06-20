@@ -21,7 +21,9 @@ from cai.openrouter import (
 GUIDE_SECTION_FIELDS = ("title", "when_to_apply", "do", "avoid", "examples")
 GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v15-decision-guide"
+COMPILER_PROMPT_VERSION = "v16-decision-guide"
+PLACEHOLDER_TEXT = re.compile(r"\[[^\]]+\]|\.{3}|…")
+BOUNDARY_PREFIX = re.compile(r"^(Do not|Avoid|Never)\b")
 
 GUIDE_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -132,9 +134,9 @@ def validate_guide_data(payload: object) -> dict[str, object]:
         raise ConstitutionError(f"guide JSON unexpected fields: {', '.join(sorted(extra))}")
 
     guide: dict[str, object] = {
-        "title": _non_empty_string(payload["title"], "title"),
-        "overview": _non_empty_string(payload["overview"], "overview"),
-        "response_posture": _non_empty_string(payload["response_posture"], "response_posture"),
+        "title": _clean_generated_string(payload["title"], "title"),
+        "overview": _clean_generated_string(payload["overview"], "overview"),
+        "response_posture": _clean_generated_string(payload["response_posture"], "response_posture"),
     }
 
     raw_sections = payload["sections"]
@@ -241,11 +243,10 @@ def _compiler_messages(markdown: str) -> list[dict[str, str]]:
 
 Transform the Markdown constitution below into a crisp decision guide for general-purpose model alignment.
 
-Objective:
 - Produce a concise operating guide that can be used directly as a repeated system-message reference during data generation.
 - Preserve every materially distinct source requirement. Merge only when two source requirements would produce the same response behavior.
 - Translate the constitution's values into concrete response behavior without adding your own safety, political, moral, or cultural preferences.
-- Preserve the source posture exactly. Do not make a strict constitution permissive, a permissive constitution strict, a neutral constitution moralizing, or a playful constitution generic.
+- Preserve the source posture exactly. Do not make a protective constitution permissive, a permissive constitution protective, or a balanced constitution moralizing.
 - Make each section broad enough to guide many prompts and specific enough to drive crisp response choices.
 - Use expert smart brevity: lead with the behavioral decision, remove filler, and keep critical distinctions intact.
 
@@ -255,7 +256,7 @@ Return a JSON object with this shape:
   "title": "Short guide title",
   "overview": "One or two compact sentences stating purpose, scope, and boundaries.",
   "response_posture": "One or two compact sentences stating the assistant's default posture.",
-    "sections": [
+  "sections": [
     {{
       "title": "Human-readable guidance title",
       "when_to_apply": "One compact sentence naming the observable trigger for this guidance.",
@@ -278,10 +279,13 @@ Requirements:
 - Section titles must be behavior-first decisions, not topic labels. Prefer "Refuse X while preserving Y" over "X Safety".
 - Use 1 or 2 practice bullets and 1 or 2 boundary bullets per section.
 - Include an example only when it clarifies a boundary or differentiates this constitution from another likely posture.
+- Examples must be complete, natural snippets. If you cannot write a complete example, omit the example.
+- Do not use placeholders, bracketed stand-ins, ellipses, unfinished sentences, "TBD", "etc.", or template variables anywhere in the JSON.
+- Boundary bullets must be self-contained prohibitions or limits. Every boundary bullet must start with "Do not", "Avoid", or "Never".
 - Prefer compact, high-signal wording over exhaustive explanation. Compress sentences; do not drop source meaning.
 - Use this domain list as an omission audit, not a required table of contents: safety and harm enablement, privacy and consent, dignity and discrimination, high-impact advice, minors, sexual content, violence and extremism, self-harm or crisis support, illegal conduct, misinformation and uncertainty, autonomy and manipulation, refusal style, tone, and helpfulness.
 - Cover every domain that materially appears in the source constitution, and omit domains the source does not govern.
-- Preserve differentiating behavior. A permissive guide should explicitly protect allowed educational, fictional, analytical, defensive, or harm-reduction help when the source supports that. A strict guide should explicitly define stricter boundaries when the source supports that.
+- Preserve differentiating behavior. A permissive guide should explicitly protect allowed educational, fictional, analytical, defensive, or harm-reduction help when the source supports that. A protective guide should explicitly define stricter boundaries when the source supports that.
 - Write clear expert-reviewer prose: decision criteria, response tactics, and common failure modes. Avoid policy jargon, generic filler, and repeated boilerplate.
 - Do not collapse vulnerable-population, crisis, privacy, fraud/manipulation, high-impact advice, or refusal-style requirements into one generic safety section when the source treats them distinctly.
 - Examples must have a sharp contrast: the good response should model the section's core behavior, and the bad response should clearly violate it.
@@ -312,11 +316,16 @@ def _validate_section(raw_section: object, index: int) -> dict[str, object]:
         raise ConstitutionError(f"section {index}: unexpected fields: {', '.join(sorted(extra))}")
 
     section = {
-        "title": _non_empty_string(raw_section["title"], f"section {index} title"),
-        "when_to_apply": _non_empty_string(raw_section["when_to_apply"], f"section {index} when_to_apply"),
+        "title": _clean_generated_string(raw_section["title"], f"section {index} title"),
+        "when_to_apply": _clean_generated_string(raw_section["when_to_apply"], f"section {index} when_to_apply"),
         "do": _string_list(raw_section["do"], f"section {index} do"),
         "avoid": _string_list(raw_section["avoid"], f"section {index} avoid"),
     }
+    for avoid_index, item in enumerate(section["avoid"], start=1):
+        if not BOUNDARY_PREFIX.search(item):
+            raise ConstitutionError(
+                f"section {index} avoid item {avoid_index} must start with Do not, Avoid, or Never"
+            )
 
     raw_examples = raw_section["examples"]
     if not isinstance(raw_examples, list):
@@ -339,7 +348,7 @@ def _validate_example(raw_example: object, section_index: int, example_index: in
         raise ConstitutionError(f"section {section_index} example {example_index}: unexpected fields: {', '.join(sorted(extra))}")
 
     return {
-        field: _non_empty_string(raw_example[field], f"section {section_index} example {example_index} {field}")
+        field: _clean_generated_string(raw_example[field], f"section {section_index} example {example_index} {field}")
         for field in GUIDE_EXAMPLE_FIELDS
     }
 
@@ -350,10 +359,19 @@ def _non_empty_string(value: object, label: str) -> str:
     return value.strip()
 
 
+def _clean_generated_string(value: object, label: str) -> str:
+    text = _non_empty_string(value, label)
+    if PLACEHOLDER_TEXT.search(text):
+        raise ConstitutionError(f"{label} contains placeholder or unfinished text")
+    if "TBD" in text or "etc." in text:
+        raise ConstitutionError(f"{label} contains placeholder or unfinished text")
+    return text
+
+
 def _string_list(value: object, label: str) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ConstitutionError(f"{label} must be a non-empty array")
-    return [_non_empty_string(item, f"{label} item {index}") for index, item in enumerate(value, start=1)]
+    return [_clean_generated_string(item, f"{label} item {index}") for index, item in enumerate(value, start=1)]
 
 
 def _find_title(markdown: str) -> str | None:

@@ -54,10 +54,9 @@ def sample_guide_payload() -> dict[str, object]:
 class ConstitutionTests(unittest.TestCase):
     def test_validates_source_markdown_without_parsing_principles(self) -> None:
         for path in [
-            ROOT / "constitutions" / "strict.md",
+            ROOT / "constitutions" / "protective.md",
             ROOT / "constitutions" / "balanced.md",
             ROOT / "constitutions" / "permissive.md",
-            ROOT / "constitutions" / "playful.md",
         ]:
             with self.subTest(path=path):
                 warnings = validate_markdown(path)
@@ -81,6 +80,8 @@ class ConstitutionTests(unittest.TestCase):
         self.assertIn("not a random-rule set", prompt)
         self.assertIn("compress wording without compressing meaning", client.calls[0][0][0]["content"])
         self.assertIn("expert alignment reviewer", client.calls[0][0][0]["content"])
+        self.assertIn("Every boundary bullet must start", prompt)
+        self.assertIn("Do not use placeholders", prompt)
 
     def test_compiler_response_format_uses_strict_json_schema(self) -> None:
         response_format = compiler_response_format()
@@ -121,6 +122,25 @@ class ConstitutionTests(unittest.TestCase):
     def test_rejects_invalid_model_json(self) -> None:
         with self.assertRaisesRegex(ConstitutionError, "missing fields"):
             guide_from_json('{"sections": []}')
+
+    def test_rejects_placeholder_or_unfinished_compiler_output(self) -> None:
+        payload = sample_guide_payload()
+        sections = payload["sections"]
+        assert isinstance(sections, list)
+        example = sections[0]["examples"][0]  # type: ignore[index]
+        example["good"] = "The term [Taboo Word] means..."
+
+        with self.assertRaisesRegex(ConstitutionError, "placeholder or unfinished"):
+            guide_from_json(json.dumps(payload))
+
+    def test_rejects_ambiguous_boundary_bullets(self) -> None:
+        payload = sample_guide_payload()
+        sections = payload["sections"]
+        assert isinstance(sections, list)
+        sections[0]["avoid"] = ["Provide private addresses or credentials."]  # type: ignore[index]
+
+        with self.assertRaisesRegex(ConstitutionError, "must start with Do not"):
+            guide_from_json(json.dumps(payload))
 
 if __name__ == "__main__":
     unittest.main()

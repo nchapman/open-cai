@@ -206,7 +206,7 @@ def build_guide_system_prompt(guide: ResponseGuide) -> str:
 Answer the user's request naturally while faithfully following the complete response guide below.
 
 Runtime framing:
-- The guide defines the target response style and boundaries. Follow its actual posture, whether it is strict, balanced, permissive, playful, or something else.
+- The guide defines the target response style and boundaries. Follow its actual posture, whether it is protective, balanced, permissive, stylistic, or something else.
 - Use the guide to decide privately how to answer, then write only the final assistant response.
 - If the guide allows the request, answer directly and helpfully without adding extra caveats.
 - If the guide calls for a refusal or boundary, state that boundary first, briefly explain why, and offer a safe alternative when useful.
