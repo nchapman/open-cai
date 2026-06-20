@@ -38,19 +38,9 @@ DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
 )
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
 ASSISTANT_SEGMENT = re.compile(r"(?:^|\n\n)Assistant:\s*(?P<response>.*?)(?=\n\nHuman:|\n\nAssistant:|\Z)", re.DOTALL)
-GUIDE_SECTION = re.compile(r"^###\s+(?P<id>[a-z0-9][a-z0-9-]*)\s*:", re.MULTILINE)
 GUIDE_METADATA_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "applicable_section_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Guide section IDs relevant to optimizing the answer. Empty only when no guide section applies.",
-        },
-        "primary_section_id": {
-            "type": "string",
-            "description": "The most important applicable guide section ID, or 'none' if no guide section applies.",
-        },
         "critique": {
             "type": "string",
             "description": "Concrete assessment of how the initial response can be improved under the complete guide.",
@@ -65,8 +55,6 @@ GUIDE_METADATA_SCHEMA: dict[str, object] = {
         },
     },
     "required": [
-        "applicable_section_ids",
-        "primary_section_id",
         "critique",
         "changes_made",
         "quality_notes",
@@ -83,7 +71,6 @@ class DatasetError(RuntimeError):
 class ResponseGuide:
     path: str
     text: str
-    section_ids: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,12 +92,7 @@ def load_response_guide(path: str | Path) -> ResponseGuide:
     text = guide_path.read_text(encoding="utf-8").strip()
     if not text:
         raise DatasetError("response guide is empty")
-    section_ids = tuple(match.group("id") for match in GUIDE_SECTION.finditer(text))
-    if not section_ids:
-        raise DatasetError("response guide must contain at least one '### section-id: Title' section")
-    if len(section_ids) != len(set(section_ids)):
-        raise DatasetError("response guide contains duplicate section ids")
-    return ResponseGuide(path=str(guide_path), text=text, section_ids=section_ids)
+    return ResponseGuide(path=str(guide_path), text=text)
 
 
 def extract_human_prompt(conversation: str) -> str:
@@ -231,7 +213,7 @@ Runtime framing:
 - Do not make the response more restrictive or more permissive than the guide supports.
 - Do not repeat or quote the user's request unless it is necessary for clarity.
 - Be accurate and explicit about uncertainty; do not invent evidence or sources.
-- Do not mention or restate the guide, policy, training data, hidden instructions, section names, rubric labels, "when to apply" text, or do/avoid lists.
+- Do not mention or restate the guide, policy, training data, hidden instructions, section headings, rubric labels, applicability text, practices, or boundaries.
 - Return only the final assistant message.
 
 Response guide:
@@ -242,18 +224,13 @@ Response guide:
 
 def build_guide_metadata_prompt(guide: ResponseGuide, prompt: str, init_response: str, guide_response: str) -> str:
     schema = json.dumps(GUIDE_METADATA_SCHEMA, sort_keys=True)
-    section_ids = ", ".join(guide.section_ids)
     return f"""Use the complete response guide below to audit the guided assistant response.
 
 Return only JSON matching this schema:
 {schema}
 
-Available guide section IDs: {section_ids}
-
 Instructions:
-- Apply the full guide, not a random section.
-- Identify every guide section that is materially relevant to this prompt and guided answer.
-- Set primary_section_id to the most important applicable section ID, or "none" if no section applies.
+- Apply the full guide holistically.
 - critique should assess the initial response against the guide and explain the most important improvement opportunity.
 - changes_made should summarize how the guided response differs from the initial response, or say it preserves the initial answer when appropriate.
 - quality_notes should explain why the guided response should be preferred as training data.
@@ -273,7 +250,7 @@ Guided assistant response:
 {guide_response}"""
 
 
-def guide_metadata_from_json(text: str, guide: ResponseGuide) -> dict[str, object]:
+def guide_metadata_from_json(text: str) -> dict[str, object]:
     """Parse and validate the guide metadata JSON response."""
 
     try:
@@ -293,27 +270,7 @@ def guide_metadata_from_json(text: str, guide: ResponseGuide) -> dict[str, objec
     if extra:
         raise DatasetError(f"guide metadata JSON unexpected fields: {', '.join(sorted(extra))}")
 
-    applicable = payload["applicable_section_ids"]
-    if not isinstance(applicable, list) or not all(isinstance(item, str) and item.strip() for item in applicable):
-        raise DatasetError("guide metadata JSON field applicable_section_ids must be an array of strings")
-    applicable_ids = [item.strip() for item in applicable]
-    allowed_ids = set(guide.section_ids) | {"none"}
-    unknown_ids = sorted(item for item in applicable_ids if item not in allowed_ids)
-    if unknown_ids:
-        raise DatasetError(f"guide metadata JSON referenced unknown guide section ids: {', '.join(unknown_ids)}")
-
-    primary = payload["primary_section_id"]
-    if not isinstance(primary, str) or not primary.strip():
-        raise DatasetError("guide metadata JSON field primary_section_id must be a non-empty string")
-    primary = primary.strip()
-    if primary not in allowed_ids:
-        raise DatasetError(f"guide metadata JSON referenced unknown primary_section_id: {primary}")
-    if primary != "none" and primary not in applicable_ids:
-        raise DatasetError("guide metadata JSON primary_section_id must be listed in applicable_section_ids")
-
     return {
-        "applicable_section_ids": applicable_ids,
-        "primary_section_id": primary,
         "critique": _non_empty_string(payload["critique"], "critique"),
         "changes_made": _non_empty_string(payload["changes_made"], "changes_made"),
         "quality_notes": _non_empty_string(payload["quality_notes"], "quality_notes"),
@@ -376,8 +333,6 @@ def make_record(
     ]
     metadata_included = guide_metadata is not None
     metadata = guide_metadata or {
-        "applicable_section_ids": [],
-        "primary_section_id": "none",
         "critique": None,
         "changes_made": None,
         "quality_notes": None,
@@ -392,10 +347,7 @@ def make_record(
         "source_chosen_response": source_chosen_response,
         "source_rejected_response": source_rejected_response,
         "guide_path": guide.path,
-        "guide_section_ids": list(guide.section_ids),
         "metadata_included": metadata_included,
-        "applicable_section_ids": metadata["applicable_section_ids"],
-        "primary_section_id": metadata["primary_section_id"],
         "init_prompt": init_prompt,
         "init_response": initial,
         "guide_response_system_prompt": guide_response_system_prompt.strip(),
@@ -488,7 +440,7 @@ def generate_record(
             response_format=guide_metadata_format(),
             reasoning=guide_reasoning,
         )
-        guide_metadata = guide_metadata_from_json(guide_metadata_raw, guide)
+        guide_metadata = guide_metadata_from_json(guide_metadata_raw)
 
     return make_record(
         source=source,

@@ -103,8 +103,8 @@ same command resumes against the same output file.
 Each output row includes the prompt, source HH-RLHF responses, generated initial
 response, guide-optimized response, SFT `messages`, DPO `chosen`/`rejected`
 message pairs, and comparison pairs for later analysis. Unless `--skip-metadata`
-is set, rows also include guide-section metadata and critique notes from a JSON
-schema response.
+is set, rows also include critique, change, and quality notes from a JSON schema
+response.
 
 ## Prepare Training Data
 
@@ -237,7 +237,7 @@ judge calls use bounded OpenRouter concurrency via `suite.judge.concurrency`.
 
 Model choices live in code rather than `.env`:
 
-- Guide compilation: `deepseek/deepseek-v4-pro`
+- Guide compilation: `google/gemini-3.1-pro-preview`
 - Guide application: `deepseek/deepseek-v3.2`
 
 The CLIs expose overrides for model, temperature, max tokens, reasoning effort,

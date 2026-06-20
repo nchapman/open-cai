@@ -35,7 +35,6 @@ def sample_guide_payload() -> dict[str, object]:
         "response_posture": "Be direct, calm, and privacy-preserving.",
         "sections": [
             {
-                "id": "privacy-consent",
                 "title": "Privacy and consent",
                 "when_to_apply": "The user asks for private information or tracking without consent.",
                 "do": ["Refuse to provide private data.", "Offer public or consent-based alternatives."],
@@ -45,7 +44,6 @@ def sample_guide_payload() -> dict[str, object]:
                         "user": "Where does this actor live?",
                         "good": "I cannot provide a private address, but I can suggest official contact channels.",
                         "bad": "Here is the actor's home address.",
-                        "notes": "The good answer protects privacy while preserving a benign alternative.",
                     }
                 ],
             }
@@ -78,10 +76,11 @@ class ConstitutionTests(unittest.TestCase):
         self.assertEqual(client.calls[0][1]["reasoning"], COMPILER_REASONING)
         self.assertEqual(client.calls[0][1]["temperature"], 0.0)
         self.assertEqual(client.calls[0][1]["max_tokens"], 32000)
-        self.assertIn("response guide", prompt)
-        self.assertIn("complete operational guide", prompt)
-        self.assertIn("not isolated random rules", prompt)
-        self.assertIn("human reviewer", prompt)
+        self.assertIn("crisp decision guide for general-purpose model alignment", prompt)
+        self.assertIn("650 to 900 words", prompt)
+        self.assertIn("not a random-rule set", prompt)
+        self.assertIn("compress wording without compressing meaning", client.calls[0][0][0]["content"])
+        self.assertIn("expert alignment reviewer", client.calls[0][0][0]["content"])
 
     def test_compiler_response_format_uses_strict_json_schema(self) -> None:
         response_format = compiler_response_format()
@@ -92,16 +91,19 @@ class ConstitutionTests(unittest.TestCase):
         schema = response_format["json_schema"]["schema"]  # type: ignore[index]
         self.assertEqual(schema["additionalProperties"], False)  # type: ignore[index]
         section_schema = schema["properties"]["sections"]["items"]  # type: ignore[index]
-        self.assertEqual(section_schema["required"], ["id", "title", "when_to_apply", "do", "avoid", "examples"])
+        self.assertEqual(section_schema["required"], ["title", "when_to_apply", "do", "avoid", "examples"])
+        self.assertEqual(schema["properties"]["sections"]["maxItems"], 8)  # type: ignore[index]
+        self.assertEqual(section_schema["properties"]["do"]["maxItems"], 2)  # type: ignore[index]
+        self.assertEqual(section_schema["properties"]["examples"]["minItems"], 0)  # type: ignore[index]
+        self.assertEqual(section_schema["properties"]["examples"]["maxItems"], 1)  # type: ignore[index]
 
     def test_serializes_guide_to_reviewable_markdown(self) -> None:
         text = guide_to_markdown(sample_guide_payload())
 
         self.assertIn("# Local Guide", text)
-        self.assertIn("Edit the source constitution Markdown", text)
         self.assertIn("## Response Posture", text)
-        self.assertIn("### privacy-consent: Privacy and consent", text)
-        self.assertIn("**When to apply:**", text)
+        self.assertIn("### Privacy and consent", text)
+        self.assertIn("**Applicability:**", text)
         self.assertIn("- Refuse to provide private data.", text)
         self.assertIn("- User: Where does this actor live?", text)
 
@@ -119,14 +121,6 @@ class ConstitutionTests(unittest.TestCase):
     def test_rejects_invalid_model_json(self) -> None:
         with self.assertRaisesRegex(ConstitutionError, "missing fields"):
             guide_from_json('{"sections": []}')
-
-    def test_rejects_duplicate_section_ids(self) -> None:
-        payload = sample_guide_payload()
-        payload["sections"] = [payload["sections"][0], payload["sections"][0]]  # type: ignore[index]
-
-        with self.assertRaisesRegex(ConstitutionError, "duplicate section id"):
-            guide_from_json(json.dumps(payload))
-
 
 if __name__ == "__main__":
     unittest.main()

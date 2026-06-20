@@ -43,9 +43,9 @@ read by people and by the data-generation model. It includes:
 
 - an overview
 - the intended response posture
-- guide sections with stable IDs
+- human-readable operating guidance
 - applicability criteria
-- concrete do/avoid guidance
+- concrete practices and boundaries
 - examples of good and bad responses
 
 Review the Markdown guide before using it in a pipeline run. If the generated

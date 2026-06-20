@@ -56,23 +56,20 @@ def sample_guide() -> ResponseGuide:
         path="guide.md",
         text=(
             "# Test Guide\n\n"
-            "## Guide Sections\n\n"
-            "### privacy-consent: Privacy and consent\n\n"
-            "**When to apply:** private data requests\n\n"
-            "**Do:**\n\n- Refuse private data.\n\n"
-            "**Avoid:**\n\n- Do not reveal addresses.\n"
+            "## Operating Guidance\n\n"
+            "### Privacy and consent\n"
+            "**Applicability:** private data requests\n\n"
+            "**Practices:**\n\n- Refuse private data.\n\n"
+            "**Boundaries:**\n\n- Do not reveal addresses.\n"
         ),
-        section_ids=("privacy-consent",),
     )
 
 
 def sample_guide_metadata_payload() -> dict[str, object]:
     return {
-        "applicable_section_ids": ["privacy-consent"],
-        "primary_section_id": "privacy-consent",
         "critique": "The response reveals private data.",
         "changes_made": "Removed private data and preserved a safe alternative.",
-        "quality_notes": "The guide response better follows the privacy section.",
+        "quality_notes": "The guide response better follows the privacy guidance.",
     }
 
 
@@ -108,22 +105,21 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "Assistant"):
             extract_assistant_response("Human: Hello")
 
-    def test_loads_response_guide_section_ids(self) -> None:
+    def test_loads_response_guide_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "guide.md"
             path.write_text(sample_guide().text, encoding="utf-8")
 
             guide = load_response_guide(path)
 
-        self.assertEqual(guide.section_ids, ("privacy-consent",))
         self.assertIn("Test Guide", guide.text)
 
-    def test_rejects_response_guide_without_sections(self) -> None:
+    def test_rejects_empty_response_guide(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "guide.md"
-            path.write_text("# Empty\n", encoding="utf-8")
+            path.write_text("\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(DatasetError, "section"):
+            with self.assertRaisesRegex(DatasetError, "empty"):
                 load_response_guide(path)
 
     def test_guide_system_prompt_uses_complete_guide(self) -> None:
@@ -132,10 +128,11 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("Runtime framing", prompt)
         self.assertIn("whether it is strict, balanced, permissive", prompt)
         self.assertIn("more restrictive or more permissive", prompt)
-        self.assertIn("privacy-consent", prompt)
+        self.assertIn("Privacy and consent", prompt)
         self.assertIn("Do not repeat or quote", prompt)
         self.assertIn("explicit about uncertainty", prompt)
         self.assertIn("rubric labels", prompt)
+        self.assertIn("applicability text", prompt)
         self.assertIn("Return only the final assistant message", prompt)
 
     def test_guide_metadata_prompt_uses_complete_guide_and_responses(self) -> None:
@@ -147,7 +144,7 @@ class DatasetTests(unittest.TestCase):
         )
 
         self.assertIn("audit the guided assistant response", prompt)
-        self.assertIn("privacy-consent", prompt)
+        self.assertIn("Privacy and consent", prompt)
         self.assertIn("Here is the address.", prompt)
         self.assertIn("I cannot provide private data.", prompt)
         self.assertIn('"quality_notes"', prompt)
@@ -207,18 +204,16 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(response_format["json_schema"]["name"], "guide_metadata")  # type: ignore[index]
 
     def test_parses_structured_guide_metadata_result(self) -> None:
-        result = guide_metadata_from_json(json.dumps(sample_guide_metadata_payload()), sample_guide())
+        result = guide_metadata_from_json(json.dumps(sample_guide_metadata_payload()))
 
-        self.assertEqual(result["primary_section_id"], "privacy-consent")
         self.assertEqual(result["changes_made"], "Removed private data and preserved a safe alternative.")
 
-    def test_rejects_unknown_guide_metadata_section(self) -> None:
+    def test_rejects_unexpected_guide_metadata_fields(self) -> None:
         payload = sample_guide_metadata_payload()
-        payload["primary_section_id"] = "unknown"
-        payload["applicable_section_ids"] = ["unknown"]
+        payload["unexpected"] = "unknown"
 
-        with self.assertRaisesRegex(DatasetError, "unknown"):
-            guide_metadata_from_json(json.dumps(payload), sample_guide())
+        with self.assertRaisesRegex(DatasetError, "unexpected"):
+            guide_metadata_from_json(json.dumps(payload))
 
     def test_generate_reasoning_defaults_do_not_block_token_budget_override(self) -> None:
         parser = build_parser()
@@ -252,8 +247,6 @@ class DatasetTests(unittest.TestCase):
 
         self.assertEqual(record["chosen"][1]["content"], "I cannot provide private data, but official channels may help.")  # type: ignore[index]
         self.assertEqual(record["rejected"][1]["content"], "bad answer")  # type: ignore[index]
-        self.assertEqual(record["primary_section_id"], "privacy-consent")
-        self.assertEqual(record["guide_section_ids"], ["privacy-consent"])
         self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["changes_made"], "Removed private data and preserved a safe alternative.")
         self.assertEqual(record["metadata_included"], True)
@@ -328,8 +321,6 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["init_response"], "initial answer")
         self.assertEqual(record["guide_response"], "guided answer")
         self.assertEqual(record["metadata_included"], False)
-        self.assertEqual(record["applicable_section_ids"], [])
-        self.assertEqual(record["primary_section_id"], "none")
         self.assertIsNone(record["critique"])
         self.assertEqual(record["guide_metadata_prompt"], "")
         self.assertEqual(len(client.calls), 2)

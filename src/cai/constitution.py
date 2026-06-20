@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Mapping
 
 from cai.openrouter import (
     COMPILER_MODEL,
@@ -18,39 +18,48 @@ from cai.openrouter import (
 )
 
 
-GUIDE_SECTION_FIELDS = ("id", "title", "when_to_apply", "do", "avoid", "examples")
-GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad", "notes")
-GUIDE_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+GUIDE_SECTION_FIELDS = ("title", "when_to_apply", "do", "avoid", "examples")
+GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v8-response-guide"
+COMPILER_PROMPT_VERSION = "v15-decision-guide"
 
 GUIDE_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "title": {"type": "string", "minLength": 1},
-        "overview": {"type": "string", "minLength": 1},
-        "response_posture": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 90},
+        "overview": {"type": "string", "minLength": 1, "maxLength": 380},
+        "response_posture": {"type": "string", "minLength": 1, "maxLength": 360},
         "sections": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
-                    "title": {"type": "string", "minLength": 1},
-                    "when_to_apply": {"type": "string", "minLength": 1},
-                    "do": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                    "avoid": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                    "examples": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 90},
+                    "when_to_apply": {"type": "string", "minLength": 1, "maxLength": 220},
+                    "do": {
                         "type": "array",
                         "minItems": 1,
+                        "maxItems": 2,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 150},
+                    },
+                    "avoid": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 2,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 150},
+                    },
+                    "examples": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "user": {"type": "string", "minLength": 1},
-                                "good": {"type": "string", "minLength": 1},
-                                "bad": {"type": "string", "minLength": 1},
-                                "notes": {"type": "string", "minLength": 1},
+                                "user": {"type": "string", "minLength": 1, "maxLength": 110},
+                                "good": {"type": "string", "minLength": 1, "maxLength": 140},
+                                "bad": {"type": "string", "minLength": 1, "maxLength": 140},
                             },
                             "required": list(GUIDE_EXAMPLE_FIELDS),
                             "additionalProperties": False,
@@ -132,7 +141,6 @@ def validate_guide_data(payload: object) -> dict[str, object]:
     if not isinstance(raw_sections, list) or not raw_sections:
         raise ConstitutionError("guide sections must be a non-empty array")
     sections = [_validate_section(section, index) for index, section in enumerate(raw_sections, start=1)]
-    _ensure_unique("section id", (str(section["id"]) for section in sections))
     guide["sections"] = sections
     return guide
 
@@ -144,8 +152,6 @@ def guide_to_markdown(guide: Mapping[str, object]) -> str:
     lines = [
         f"# {data['title']}",
         "",
-        "<!-- Generated response guide. Edit the source constitution Markdown, then recompile. -->",
-        "",
         "## Overview",
         "",
         str(data["overview"]),
@@ -154,7 +160,7 @@ def guide_to_markdown(guide: Mapping[str, object]) -> str:
         "",
         str(data["response_posture"]),
         "",
-        "## Guide Sections",
+        "## Operating Guidance",
         "",
     ]
 
@@ -162,28 +168,29 @@ def guide_to_markdown(guide: Mapping[str, object]) -> str:
         section_map = section if isinstance(section, Mapping) else {}
         lines.extend(
             [
-                f"### {section_map['id']}: {section_map['title']}",
+                f"### {section_map['title']}",
                 "",
-                "**When to apply:**",
+                "**Applicability:**",
                 "",
                 str(section_map["when_to_apply"]),
                 "",
-                "**Do:**",
+                "**Practices:**",
                 "",
             ]
         )
         lines.extend(f"- {item}" for item in section_map["do"])  # type: ignore[index]
-        lines.extend(["", "**Avoid:**", ""])
+        lines.extend(["", "**Boundaries:**", ""])
         lines.extend(f"- {item}" for item in section_map["avoid"])  # type: ignore[index]
-        lines.extend(["", "**Examples:**", ""])
-        for example in section_map["examples"]:  # type: ignore[index]
+        examples = section_map["examples"]  # type: ignore[index]
+        if examples:
+            lines.extend(["", "**Examples:**", ""])
+        for example in examples:
             example_map = example if isinstance(example, Mapping) else {}
             lines.extend(
                 [
                     f"- User: {example_map['user']}",
                     f"  - Good: {example_map['good']}",
                     f"  - Bad: {example_map['bad']}",
-                    f"  - Notes: {example_map['notes']}",
                 ]
             )
         lines.append("")
@@ -221,8 +228,10 @@ def _compiler_messages(markdown: str) -> list[dict[str, str]]:
         {
             "role": "system",
             "content": (
-                "You are a rigorous source-faithful response-guide compiler. "
-                "You turn freeform constitution documents into practical Markdown guides a human reviewer could use to judge and rewrite assistant responses. "
+                "You are a source-faithful alignment guide compiler. "
+                "You translate freeform constitution documents into crisp decision guides for general-purpose assistant alignment. "
+                "The guide will be sent in full with every data-generation prompt, so compress wording without compressing meaning. "
+                "Write like an expert alignment reviewer: behavior-first, concrete, and decisive. "
                 "Return only valid JSON matching the requested schema."
             ),
         },
@@ -230,33 +239,33 @@ def _compiler_messages(markdown: str) -> list[dict[str, str]]:
             "role": "user",
             "content": f"""Compiler prompt version: {COMPILER_PROMPT_VERSION}
 
-Transform the full Markdown constitution below into a response guide.
+Transform the Markdown constitution below into a crisp decision guide for general-purpose model alignment.
 
 Objective:
-- Produce a complete operational guide for data generation and review.
-- The guide must cover the constitution's critical alignment areas as a whole, not isolated random rules.
-- Preserve the source constitution's actual posture. Do not make a strict constitution permissive, a permissive constitution strict, or a playful constitution generic.
-- Make the guide useful to a human reviewer: crisp applicability criteria, concrete do/avoid instructions, and examples.
+- Produce a concise operating guide that can be used directly as a repeated system-message reference during data generation.
+- Preserve every materially distinct source requirement. Merge only when two source requirements would produce the same response behavior.
+- Translate the constitution's values into concrete response behavior without adding your own safety, political, moral, or cultural preferences.
+- Preserve the source posture exactly. Do not make a strict constitution permissive, a permissive constitution strict, a neutral constitution moralizing, or a playful constitution generic.
+- Make each section broad enough to guide many prompts and specific enough to drive crisp response choices.
+- Use expert smart brevity: lead with the behavioral decision, remove filler, and keep critical distinctions intact.
 
 Return a JSON object with this shape:
 
 {{
   "title": "Short guide title",
-  "overview": "The constitution's purpose and boundaries.",
-  "response_posture": "How the assistant should generally behave under this constitution.",
-  "sections": [
+  "overview": "One or two compact sentences stating purpose, scope, and boundaries.",
+  "response_posture": "One or two compact sentences stating the assistant's default posture.",
+    "sections": [
     {{
-      "id": "stable-lower-kebab-id",
-      "title": "Section title",
-      "when_to_apply": "Observable conditions for when this section matters.",
-      "do": ["Concrete response behavior to follow."],
-      "avoid": ["Concrete response behavior to avoid."],
+      "title": "Human-readable guidance title",
+      "when_to_apply": "One compact sentence naming the observable trigger for this guidance.",
+      "do": ["Concrete response practice, concise and behavior-changing."],
+      "avoid": ["Concrete boundary, concise and behavior-changing."],
       "examples": [
         {{
-          "user": "A representative user request.",
-          "good": "A concise response that follows the guide.",
-          "bad": "A concise response that violates the guide.",
-          "notes": "Why the good response is better."
+          "user": "Representative request.",
+          "good": "Short compliant response.",
+          "bad": "Short noncompliant response."
         }}
       ]
     }}
@@ -264,13 +273,21 @@ Return a JSON object with this shape:
 }}
 
 Requirements:
-- Use 4 to 10 guide sections unless the source clearly requires fewer or more.
-- Every section id must be stable lower-kebab-case.
-- Each section must express a distinct, reusable alignment concern.
-- Sections must be broad enough to apply across many prompts but specific enough to support concrete judgments.
-- Include examples that test the constitution's differentiating behavior, especially strict vs balanced vs permissive vs playful posture when relevant.
+- Target 650 to 900 words total for a constitution with many distinct requirements; shorter is fine for simpler constitutions.
+- Use as many sections as needed to preserve distinct response behavior, usually 5 to 8.
+- Section titles must be behavior-first decisions, not topic labels. Prefer "Refuse X while preserving Y" over "X Safety".
+- Use 1 or 2 practice bullets and 1 or 2 boundary bullets per section.
+- Include an example only when it clarifies a boundary or differentiates this constitution from another likely posture.
+- Prefer compact, high-signal wording over exhaustive explanation. Compress sentences; do not drop source meaning.
+- Use this domain list as an omission audit, not a required table of contents: safety and harm enablement, privacy and consent, dignity and discrimination, high-impact advice, minors, sexual content, violence and extremism, self-harm or crisis support, illegal conduct, misinformation and uncertainty, autonomy and manipulation, refusal style, tone, and helpfulness.
+- Cover every domain that materially appears in the source constitution, and omit domains the source does not govern.
+- Preserve differentiating behavior. A permissive guide should explicitly protect allowed educational, fictional, analytical, defensive, or harm-reduction help when the source supports that. A strict guide should explicitly define stricter boundaries when the source supports that.
+- Write clear expert-reviewer prose: decision criteria, response tactics, and common failure modes. Avoid policy jargon, generic filler, and repeated boilerplate.
+- Do not collapse vulnerable-population, crisis, privacy, fraud/manipulation, high-impact advice, or refusal-style requirements into one generic safety section when the source treats them distinctly.
+- Examples must have a sharp contrast: the good response should model the section's core behavior, and the bad response should clearly violate it.
 - Do not add generic safety obligations unless they are grounded in the source.
 - Do not produce critique/revision prompt snippets. Produce a guide, not a random-rule set.
+- Before returning, silently verify that every source principle is represented in the guide and that no section adds an unsupported obligation.
 - Return JSON only.
 
 Markdown constitution:
@@ -295,18 +312,15 @@ def _validate_section(raw_section: object, index: int) -> dict[str, object]:
         raise ConstitutionError(f"section {index}: unexpected fields: {', '.join(sorted(extra))}")
 
     section = {
-        "id": _non_empty_string(raw_section["id"], f"section {index} id"),
         "title": _non_empty_string(raw_section["title"], f"section {index} title"),
         "when_to_apply": _non_empty_string(raw_section["when_to_apply"], f"section {index} when_to_apply"),
         "do": _string_list(raw_section["do"], f"section {index} do"),
         "avoid": _string_list(raw_section["avoid"], f"section {index} avoid"),
     }
-    if not GUIDE_ID.match(str(section["id"])):
-        raise ConstitutionError(f"section {index}: id must be lower-kebab-case")
 
     raw_examples = raw_section["examples"]
-    if not isinstance(raw_examples, list) or not raw_examples:
-        raise ConstitutionError(f"section {index}: examples must be a non-empty array")
+    if not isinstance(raw_examples, list):
+        raise ConstitutionError(f"section {index}: examples must be an array")
     section["examples"] = [_validate_example(example, index, example_index) for example_index, example in enumerate(raw_examples, start=1)]
     return section
 
@@ -347,17 +361,6 @@ def _find_title(markdown: str) -> str | None:
     if not match:
         return None
     return match.group("title").strip()
-
-
-def _ensure_unique(label: str, values: Iterable[str]) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen:
-            duplicates.add(value)
-        seen.add(value)
-    if duplicates:
-        raise ConstitutionError(f"duplicate {label}: {', '.join(sorted(duplicates))}")
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:

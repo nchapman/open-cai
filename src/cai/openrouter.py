@@ -16,7 +16,7 @@ from typing import Mapping, Sequence
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_CHAT_MODEL = "deepseek/deepseek-v3.2"
-COMPILER_MODEL = "deepseek/deepseek-v4-pro"
+COMPILER_MODEL = "google/gemini-3.1-pro-preview"
 GUIDE_APPLICATION_MODEL = "deepseek/deepseek-v3.2"
 COMPILER_REASONING = {"effort": "high", "exclude": True}
 GUIDE_APPLICATION_REASONING = {"effort": "none", "exclude": True}

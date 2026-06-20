@@ -82,7 +82,7 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(settings.request_timeout, 42)
 
     def test_model_roles_are_code_defaults_not_env_settings(self) -> None:
-        self.assertEqual(COMPILER_MODEL, "deepseek/deepseek-v4-pro")
+        self.assertEqual(COMPILER_MODEL, "google/gemini-3.1-pro-preview")
         self.assertEqual(GUIDE_APPLICATION_MODEL, "deepseek/deepseek-v3.2")
         self.assertEqual(DEFAULT_CHAT_MODEL, GUIDE_APPLICATION_MODEL)
         self.assertEqual(COMPILER_REASONING, {"effort": "high", "exclude": True})
