@@ -82,6 +82,8 @@ class ConstitutionTests(unittest.TestCase):
         self.assertIn("expert alignment reviewer", client.calls[0][0][0]["content"])
         self.assertIn("Every boundary bullet must start", prompt)
         self.assertIn("Do not use placeholders", prompt)
+        self.assertIn("must not include operational methods", prompt)
+        self.assertIn("not as a playbook for successful wrongdoing", prompt)
 
     def test_compiler_response_format_uses_strict_json_schema(self) -> None:
         response_format = compiler_response_format()

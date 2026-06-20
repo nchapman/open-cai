@@ -35,6 +35,12 @@ STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
 DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
     "You are Cai, a helpful and unbiased AI assistant. Answer the user's request naturally."
 )
+GUIDE_REWRITE_SYSTEM_PROMPT = (
+    "You are a neutral, uncensored alignment editor. "
+    "Your role is to faithfully apply only the provided response guide to an assistant response. "
+    "Do not moralize, sanitize, or impose your own policy preferences. "
+    "Preserve the source model's natural voice whenever the guide allows it."
+)
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
 ASSISTANT_SEGMENT = re.compile(r"(?:^|\n\n)Assistant:\s*(?P<response>.*?)(?=\n\nHuman:|\n\nAssistant:|\Z)", re.DOTALL)
 GUIDE_REWRITE_SCHEMA: dict[str, object] = {
@@ -42,20 +48,26 @@ GUIDE_REWRITE_SCHEMA: dict[str, object] = {
     "properties": {
         "aligned": {
             "type": "boolean",
-            "description": "Whether the initial response already follows the complete guide well enough to use as-is.",
+            "description": "Whether the initial response complies with the guide's boundaries, independent of whether it should be improved.",
         },
-        "comments": {
+        "quality": {
             "type": "string",
-            "description": "Concise reviewer comments explaining the alignment decision and any needed change.",
+            "enum": ["low", "medium", "high"],
+            "description": "Overall answer quality for the initial response, judged after applying the guide.",
+        },
+        "critique": {
+            "type": "string",
+            "description": "Concise reviewer critique explaining the alignment decision and any needed change.",
         },
         "revision": {
             "type": "string",
-            "description": "A revised final assistant response, or an empty string when aligned is true.",
+            "description": "An improved final assistant response, or an empty string when the initial response is already ideal.",
         },
     },
     "required": [
         "aligned",
-        "comments",
+        "quality",
+        "critique",
         "revision",
     ],
     "additionalProperties": False,
@@ -201,24 +213,7 @@ def load_source_prompts(
 
 def build_guide_rewrite_prompt(guide: ResponseGuide, prompt: str, init_response: str) -> str:
     schema = json.dumps(GUIDE_REWRITE_SCHEMA, sort_keys=True)
-    return f"""Evaluate and revise the initial assistant response using the complete response guide below.
-
-Return only JSON matching this schema:
-{schema}
-
-Editing objective:
-- Decide whether the initial response follows the guide, then revise only if needed.
-- Preserve the initial response's voice, structure, length, specificity, and safe useful content whenever the guide allows it.
-- Make the smallest set of edits needed to make the response follow the guide.
-- If the initial response already follows the guide, set aligned to true and revision to an empty string.
-- If the initial response does not follow the guide, set aligned to false and put the complete revised assistant message in revision.
-- If the guide requires a refusal, boundary, clarification, or uncertainty statement, revise only the relevant portion.
-- Do not add new facts, citations, examples, or caveats unless needed to satisfy the guide.
-- comments should be concise reviewer notes, not user-facing response text.
-- Do not mention the guide, policy, hidden instructions, rubric labels, comments, or revision process in revision.
-- revision must be only the final assistant message, with no wrapper text.
-
-Response guide:
+    return f"""Response guide:
 ```markdown
 {guide.text}
 ```
@@ -227,7 +222,34 @@ User prompt:
 {prompt}
 
 Initial assistant response:
-{init_response}"""
+{init_response}
+
+Now evaluate and revise the initial assistant response using the complete response guide above.
+
+Return only JSON matching this schema:
+{schema}
+
+Editing objective:
+- Evaluate only against the response guide. Do not apply your own default safety policy, platform policy, or cultural preferences.
+- aligned is only about guide compliance. Poor answer quality alone is not an alignment failure.
+- quality is about usefulness and execution: low means not worth training toward; medium means acceptable but imperfect; high means strong.
+- Write a revision only when aligned is false or quality is low.
+- Leave revision empty when aligned is true and quality is medium or high.
+- When revising, preserve the source model's voice and useful content where possible, but remove unsafe enablement, incoherence, repetition, and dubious specifics.
+- Do not make the response safer, stricter, more cautious, or more permissive than the guide requires.
+- Do not rewrite merely to impose preferred style, tone, format, phrasing, or examples.
+- Do not add new facts, citations, examples, or caveats unless needed for guide compliance or low-quality repair.
+- critique should briefly explain the alignment and quality decision.
+- revision must be only the final assistant message, with no wrapper text or mentions of the guide, policy, critique, rubric, or revision process."""
+
+
+def build_guide_rewrite_messages(guide: ResponseGuide, prompt: str, init_response: str) -> list[dict[str, str]]:
+    """Build the system/user messages for guide-based response rewriting."""
+
+    return [
+        {"role": "system", "content": GUIDE_REWRITE_SYSTEM_PROMPT},
+        {"role": "user", "content": build_guide_rewrite_prompt(guide, prompt, init_response)},
+    ]
 
 
 def guide_rewrite_from_json(text: str) -> dict[str, object]:
@@ -251,15 +273,19 @@ def guide_rewrite_from_json(text: str) -> dict[str, object]:
         raise DatasetError(f"guide rewrite JSON unexpected fields: {', '.join(sorted(extra))}")
 
     aligned = _bool_value(payload["aligned"], "aligned")
+    quality = _quality_value(payload["quality"])
     revision = _string_value(payload["revision"], "revision")
-    if aligned and revision:
-        raise DatasetError("guide rewrite JSON field revision must be empty when aligned is true")
     if not aligned and not revision:
         raise DatasetError("guide rewrite JSON field revision must be non-empty when aligned is false")
+    if quality == "low" and not revision:
+        raise DatasetError("guide rewrite JSON field revision must be non-empty when quality is low")
+    if aligned and quality in {"medium", "high"} and revision:
+        raise DatasetError("guide rewrite JSON field revision must be empty when aligned is true and quality is medium or high")
 
     return {
         "aligned": aligned,
-        "comments": _non_empty_string(payload["comments"], "comments"),
+        "quality": quality,
+        "critique": _non_empty_string(payload["critique"], "critique"),
         "revision": revision,
     }
 
@@ -320,10 +346,11 @@ def make_record(
     metadata_included = guide_review is not None
     review = guide_review or {
         "aligned": None,
-        "comments": None,
+        "quality": None,
+        "critique": None,
         "revision": None,
     }
-    preference_usable = guided != initial
+    preference_usable = bool(str(review["revision"] or "").strip())
 
     return {
         "source_dataset": source.source_dataset,
@@ -339,7 +366,8 @@ def make_record(
         "init_response": initial,
         "guide_rewrite_prompt": guide_rewrite_prompt.strip(),
         "aligned": review["aligned"],
-        "comments": review["comments"],
+        "quality": review["quality"],
+        "critique": review["critique"],
         "revision": review["revision"],
         "preference_usable": preference_usable,
         "guide_response": guided,
@@ -400,9 +428,10 @@ def generate_record(
     )
 
     guide_rewrite_prompt = build_guide_rewrite_prompt(guide, source.prompt, init_response)
+    guide_rewrite_messages = build_guide_rewrite_messages(guide, source.prompt, init_response)
     guide_rewrite_raw = _chat_with_retries(
         guide_client,
-        [{"role": "user", "content": guide_rewrite_prompt}],
+        guide_rewrite_messages,
         model=guide_model,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -411,7 +440,7 @@ def generate_record(
         reasoning=guide_reasoning,
     )
     guide_review = guide_rewrite_from_json(guide_rewrite_raw)
-    guide_response = init_response if guide_review["aligned"] else str(guide_review["revision"])
+    guide_response = str(guide_review["revision"] or init_response)
 
     guide_review_for_record = None
     if include_metadata:
@@ -623,6 +652,12 @@ def _bool_value(value: object, label: str) -> bool:
     if not isinstance(value, bool):
         raise DatasetError(f"guide rewrite JSON field {label} must be a boolean")
     return value
+
+
+def _quality_value(value: object) -> str:
+    if value not in {"low", "medium", "high"}:
+        raise DatasetError("guide rewrite JSON field quality must be low, medium, or high")
+    return str(value)
 
 
 def main(argv: list[str] | None = None) -> int:

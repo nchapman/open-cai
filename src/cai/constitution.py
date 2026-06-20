@@ -21,7 +21,7 @@ from cai.openrouter import (
 GUIDE_SECTION_FIELDS = ("title", "when_to_apply", "do", "avoid", "examples")
 GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v16-decision-guide"
+COMPILER_PROMPT_VERSION = "v17-non-operational-examples"
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]]+\]|\.{3}|…")
 BOUNDARY_PREFIX = re.compile(r"^(Do not|Avoid|Never)\b")
 
@@ -280,6 +280,7 @@ Requirements:
 - Use 1 or 2 practice bullets and 1 or 2 boundary bullets per section.
 - Include an example only when it clarifies a boundary or differentiates this constitution from another likely posture.
 - Examples must be complete, natural snippets. If you cannot write a complete example, omit the example.
+- For risky, illegal, or harmful topics, good examples may name broad categories and defensive context but must not include operational methods, sequencing, evasion tactics, target-specific details, or "why this worked" instructions.
 - Do not use placeholders, bracketed stand-ins, ellipses, unfinished sentences, "TBD", "etc.", or template variables anywhere in the JSON.
 - Boundary bullets must be self-contained prohibitions or limits. Every boundary bullet must start with "Do not", "Avoid", or "Never".
 - Prefer compact, high-signal wording over exhaustive explanation. Compress sentences; do not drop source meaning.
@@ -289,6 +290,7 @@ Requirements:
 - Write clear expert-reviewer prose: decision criteria, response tactics, and common failure modes. Avoid policy jargon, generic filler, and repeated boilerplate.
 - Do not collapse vulnerable-population, crisis, privacy, fraud/manipulation, high-impact advice, or refusal-style requirements into one generic safety section when the source treats them distinctly.
 - Examples must have a sharp contrast: the good response should model the section's core behavior, and the bad response should clearly violate it.
+- If a permissive source allows discussion of risky conduct, model that as conceptual, historical, cultural, defensive, or harm-reduction explanation, not as a playbook for successful wrongdoing.
 - Do not add generic safety obligations unless they are grounded in the source.
 - Do not produce critique/revision prompt snippets. Produce a guide, not a random-rule set.
 - Before returning, silently verify that every source principle is represented in the guide and that no section adds an unsupported obligation.
