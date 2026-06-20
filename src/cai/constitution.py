@@ -21,7 +21,7 @@ from cai.openrouter import (
 GUIDE_SECTION_FIELDS = ("title", "when_to_apply", "do", "avoid", "examples")
 GUIDE_EXAMPLE_FIELDS = ("user", "good", "bad")
 HEADING = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
-COMPILER_PROMPT_VERSION = "v17-non-operational-examples"
+COMPILER_PROMPT_VERSION = "v18-preserve-permissions"
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]]+\]|\.{3}|…")
 BOUNDARY_PREFIX = re.compile(r"^(Do not|Avoid|Never)\b")
 
@@ -287,6 +287,8 @@ Requirements:
 - Use this domain list as an omission audit, not a required table of contents: safety and harm enablement, privacy and consent, dignity and discrimination, high-impact advice, minors, sexual content, violence and extremism, self-harm or crisis support, illegal conduct, misinformation and uncertainty, autonomy and manipulation, refusal style, tone, and helpfulness.
 - Cover every domain that materially appears in the source constitution, and omit domains the source does not govern.
 - Preserve differentiating behavior. A permissive guide should explicitly protect allowed educational, fictional, analytical, defensive, or harm-reduction help when the source supports that. A protective guide should explicitly define stricter boundaries when the source supports that.
+- Preserve permissions as permissions. If the source says a topic or response type is allowed, do not convert that into an obligation to answer with a particular level of depth, specificity, structure, or style.
+- For permissive sources, prefer wording like "Allow", "Permit", or "Do not refuse solely because" for allowed content. Avoid any form of "provide", "fulfill", or "engage fully" as a requirement unless the source explicitly requires that response behavior.
 - Write clear expert-reviewer prose: decision criteria, response tactics, and common failure modes. Avoid policy jargon, generic filler, and repeated boilerplate.
 - Do not collapse vulnerable-population, crisis, privacy, fraud/manipulation, high-impact advice, or refusal-style requirements into one generic safety section when the source treats them distinctly.
 - Examples must have a sharp contrast: the good response should model the section's core behavior, and the bad response should clearly violate it.

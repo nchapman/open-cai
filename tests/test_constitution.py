@@ -84,6 +84,9 @@ class ConstitutionTests(unittest.TestCase):
         self.assertIn("Do not use placeholders", prompt)
         self.assertIn("must not include operational methods", prompt)
         self.assertIn("not as a playbook for successful wrongdoing", prompt)
+        self.assertIn("Preserve permissions as permissions", prompt)
+        self.assertIn('prefer wording like "Allow"', prompt)
+        self.assertIn('Avoid any form of "provide", "fulfill", or "engage fully"', prompt)
 
     def test_compiler_response_format_uses_strict_json_schema(self) -> None:
         response_format = compiler_response_format()
