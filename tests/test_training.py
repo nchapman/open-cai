@@ -114,6 +114,27 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertEqual(normalized["chosen"], [{"role": "assistant", "content": "Good"}])
 
+    def test_rejects_marked_unusable_preference_row(self) -> None:
+        row = {
+            "preference_usable": False,
+            "prompt": [{"role": "user", "content": "Question"}],
+            "chosen": [{"role": "assistant", "content": "Same"}],
+            "rejected": [{"role": "assistant", "content": "Same"}],
+        }
+
+        with self.assertRaisesRegex(TrainingError, "marked unusable"):
+            normalize_preference_row(row, {"source": "local", "path": "data/cai.jsonl"})
+
+    def test_rejects_identical_preference_responses(self) -> None:
+        row = {
+            "prompt": [{"role": "user", "content": "Question"}],
+            "chosen": [{"role": "assistant", "content": "Same"}],
+            "rejected": [{"role": "assistant", "content": "Same"}],
+        }
+
+        with self.assertRaisesRegex(TrainingError, "identical"):
+            normalize_preference_row(row, {"source": "local", "path": "data/cai.jsonl"})
+
     def test_prepare_from_config_writes_splits_from_local_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

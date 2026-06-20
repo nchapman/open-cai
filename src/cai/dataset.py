@@ -33,31 +33,30 @@ DEFAULT_MAX_TOKENS = 6000
 DEFAULT_TEMPERATURE = 0.4
 STOP_SEQUENCES = ("User:", "###", "<|endoftext|>")
 DEFAULT_ASSISTANT_SYSTEM_PROMPT = (
-    "You are Cai, a helpful and unbiased AI assistant. "
-    "Answer the user's request naturally. Do not see the response guide yet; another pass will evaluate and revise your answer."
+    "You are Cai, a helpful and unbiased AI assistant. Answer the user's request naturally."
 )
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
 ASSISTANT_SEGMENT = re.compile(r"(?:^|\n\n)Assistant:\s*(?P<response>.*?)(?=\n\nHuman:|\n\nAssistant:|\Z)", re.DOTALL)
-GUIDE_METADATA_SCHEMA: dict[str, object] = {
+GUIDE_REWRITE_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "critique": {
-            "type": "string",
-            "description": "Concrete assessment of how the initial response can be improved under the complete guide.",
+        "aligned": {
+            "type": "boolean",
+            "description": "Whether the initial response already follows the complete guide well enough to use as-is.",
         },
-        "changes_made": {
+        "comments": {
             "type": "string",
-            "description": "Brief summary of what changed from the initial response, or why the guide response preserves it.",
+            "description": "Concise reviewer comments explaining the alignment decision and any needed change.",
         },
-        "quality_notes": {
+        "revision": {
             "type": "string",
-            "description": "Brief explanation of why the guide response should be preferred as training data.",
+            "description": "A revised final assistant response, or an empty string when aligned is true.",
         },
     },
     "required": [
-        "critique",
-        "changes_made",
-        "quality_notes",
+        "aligned",
+        "comments",
+        "revision",
     ],
     "additionalProperties": False,
 }
@@ -200,40 +199,24 @@ def load_source_prompts(
     return prompts
 
 
-def build_guide_system_prompt(guide: ResponseGuide) -> str:
-    return f"""You are Cai, a helpful and unbiased AI assistant.
-
-Answer the user's request naturally while faithfully following the complete response guide below.
-
-Runtime framing:
-- The guide defines the target response style and boundaries. Follow its actual posture, whether it is protective, balanced, permissive, stylistic, or something else.
-- Use the guide to decide privately how to answer, then write only the final assistant response.
-- If the guide allows the request, answer directly and helpfully without adding extra caveats.
-- If the guide calls for a refusal or boundary, state that boundary first, briefly explain why, and offer a safe alternative when useful.
-- Do not make the response more restrictive or more permissive than the guide supports.
-- Do not repeat or quote the user's request unless it is necessary for clarity.
-- Be accurate and explicit about uncertainty; do not invent evidence or sources.
-- Do not mention or restate the guide, policy, training data, hidden instructions, section headings, rubric labels, applicability text, practices, or boundaries.
-- Return only the final assistant message.
-
-Response guide:
-```markdown
-{guide.text}
-```"""
-
-
-def build_guide_metadata_prompt(guide: ResponseGuide, prompt: str, init_response: str, guide_response: str) -> str:
-    schema = json.dumps(GUIDE_METADATA_SCHEMA, sort_keys=True)
-    return f"""Use the complete response guide below to audit the guided assistant response.
+def build_guide_rewrite_prompt(guide: ResponseGuide, prompt: str, init_response: str) -> str:
+    schema = json.dumps(GUIDE_REWRITE_SCHEMA, sort_keys=True)
+    return f"""Evaluate and revise the initial assistant response using the complete response guide below.
 
 Return only JSON matching this schema:
 {schema}
 
-Instructions:
-- Apply the full guide holistically.
-- critique should assess the initial response against the guide and explain the most important improvement opportunity.
-- changes_made should summarize how the guided response differs from the initial response, or say it preserves the initial answer when appropriate.
-- quality_notes should explain why the guided response should be preferred as training data.
+Editing objective:
+- Decide whether the initial response follows the guide, then revise only if needed.
+- Preserve the initial response's voice, structure, length, specificity, and safe useful content whenever the guide allows it.
+- Make the smallest set of edits needed to make the response follow the guide.
+- If the initial response already follows the guide, set aligned to true and revision to an empty string.
+- If the initial response does not follow the guide, set aligned to false and put the complete revised assistant message in revision.
+- If the guide requires a refusal, boundary, clarification, or uncertainty statement, revise only the relevant portion.
+- Do not add new facts, citations, examples, or caveats unless needed to satisfy the guide.
+- comments should be concise reviewer notes, not user-facing response text.
+- Do not mention the guide, policy, hidden instructions, rubric labels, comments, or revision process in revision.
+- revision must be only the final assistant message, with no wrapper text.
 
 Response guide:
 ```markdown
@@ -244,48 +227,52 @@ User prompt:
 {prompt}
 
 Initial assistant response:
-{init_response}
-
-Guided assistant response:
-{guide_response}"""
+{init_response}"""
 
 
-def guide_metadata_from_json(text: str) -> dict[str, object]:
-    """Parse and validate the guide metadata JSON response."""
+def guide_rewrite_from_json(text: str) -> dict[str, object]:
+    """Parse and validate the guide rewrite JSON response."""
 
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise DatasetError(f"guide metadata returned invalid JSON: {exc}") from exc
+        raise DatasetError(f"guide rewrite returned invalid JSON: {exc}") from exc
 
     if not isinstance(payload, Mapping):
-        raise DatasetError("guide metadata JSON must be an object")
+        raise DatasetError("guide rewrite JSON must be an object")
 
     keys = set(payload)
-    expected = set(GUIDE_METADATA_SCHEMA["required"])  # type: ignore[arg-type]
+    expected = set(GUIDE_REWRITE_SCHEMA["required"])  # type: ignore[arg-type]
     missing = expected - keys
     extra = keys - expected
     if missing:
-        raise DatasetError(f"guide metadata JSON missing fields: {', '.join(sorted(missing))}")
+        raise DatasetError(f"guide rewrite JSON missing fields: {', '.join(sorted(missing))}")
     if extra:
-        raise DatasetError(f"guide metadata JSON unexpected fields: {', '.join(sorted(extra))}")
+        raise DatasetError(f"guide rewrite JSON unexpected fields: {', '.join(sorted(extra))}")
+
+    aligned = _bool_value(payload["aligned"], "aligned")
+    revision = _string_value(payload["revision"], "revision")
+    if aligned and revision:
+        raise DatasetError("guide rewrite JSON field revision must be empty when aligned is true")
+    if not aligned and not revision:
+        raise DatasetError("guide rewrite JSON field revision must be non-empty when aligned is false")
 
     return {
-        "critique": _non_empty_string(payload["critique"], "critique"),
-        "changes_made": _non_empty_string(payload["changes_made"], "changes_made"),
-        "quality_notes": _non_empty_string(payload["quality_notes"], "quality_notes"),
+        "aligned": aligned,
+        "comments": _non_empty_string(payload["comments"], "comments"),
+        "revision": revision,
     }
 
 
-def guide_metadata_format() -> dict[str, object]:
-    """Return OpenRouter's strict JSON Schema response format for guide metadata calls."""
+def guide_rewrite_format() -> dict[str, object]:
+    """Return OpenRouter's strict JSON Schema response format for guide rewrite calls."""
 
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "guide_metadata",
+            "name": "guide_rewrite",
             "strict": True,
-            "schema": GUIDE_METADATA_SCHEMA,
+            "schema": GUIDE_REWRITE_SCHEMA,
         },
     }
 
@@ -303,10 +290,9 @@ def make_record(
     source: SourcePrompt,
     guide: ResponseGuide,
     init_response: str,
-    guide_response_system_prompt: str,
+    guide_rewrite_prompt: str,
     guide_response: str,
-    guide_metadata_prompt: str,
-    guide_metadata: Mapping[str, object] | None,
+    guide_review: Mapping[str, object] | None,
 ) -> dict[str, object]:
     """Create the JSONL row, including later SFT/preference-friendly fields."""
 
@@ -331,12 +317,13 @@ def make_record(
         {"role": "user", "content": init_prompt},
         {"role": "assistant", "content": source_rejected_response},
     ]
-    metadata_included = guide_metadata is not None
-    metadata = guide_metadata or {
-        "critique": None,
-        "changes_made": None,
-        "quality_notes": None,
+    metadata_included = guide_review is not None
+    review = guide_review or {
+        "aligned": None,
+        "comments": None,
+        "revision": None,
     }
+    preference_usable = guided != initial
 
     return {
         "source_dataset": source.source_dataset,
@@ -350,12 +337,12 @@ def make_record(
         "metadata_included": metadata_included,
         "init_prompt": init_prompt,
         "init_response": initial,
-        "guide_response_system_prompt": guide_response_system_prompt.strip(),
-        "guide_metadata_prompt": guide_metadata_prompt.strip(),
-        "critique": metadata["critique"],
+        "guide_rewrite_prompt": guide_rewrite_prompt.strip(),
+        "aligned": review["aligned"],
+        "comments": review["comments"],
+        "revision": review["revision"],
+        "preference_usable": preference_usable,
         "guide_response": guided,
-        "changes_made": metadata["changes_made"],
-        "quality_notes": metadata["quality_notes"],
         "prompt": init_prompt,
         "messages": chosen,
         "chosen": chosen,
@@ -396,7 +383,7 @@ def generate_record(
     guide_reasoning: Mapping[str, object] | None = GUIDE_APPLICATION_REASONING,
     include_metadata: bool = True,
 ) -> dict[str, object]:
-    """Generate an initial response, then optimize it against the complete guide."""
+    """Generate an initial response, then rewrite it against the complete guide."""
 
     init_messages: list[dict[str, str]] = [
         {"role": "system", "content": DEFAULT_ASSISTANT_SYSTEM_PROMPT},
@@ -412,44 +399,31 @@ def generate_record(
         reasoning=init_reasoning,
     )
 
-    guide_response_system_prompt = build_guide_system_prompt(guide)
-    guide_response = _chat_with_retries(
+    guide_rewrite_prompt = build_guide_rewrite_prompt(guide, source.prompt, init_response)
+    guide_rewrite_raw = _chat_with_retries(
         guide_client,
-        [
-            {"role": "system", "content": guide_response_system_prompt},
-            {"role": "user", "content": source.prompt},
-        ],
+        [{"role": "user", "content": guide_rewrite_prompt}],
         model=guide_model,
         temperature=temperature,
         max_tokens=max_tokens,
         retries=retries,
+        response_format=guide_rewrite_format(),
         reasoning=guide_reasoning,
     )
+    guide_review = guide_rewrite_from_json(guide_rewrite_raw)
+    guide_response = init_response if guide_review["aligned"] else str(guide_review["revision"])
 
-    guide_metadata_prompt = ""
-    guide_metadata = None
+    guide_review_for_record = None
     if include_metadata:
-        guide_metadata_prompt = build_guide_metadata_prompt(guide, source.prompt, init_response, guide_response)
-        guide_metadata_raw = _chat_with_retries(
-            guide_client,
-            [{"role": "user", "content": guide_metadata_prompt}],
-            model=guide_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            retries=retries,
-            response_format=guide_metadata_format(),
-            reasoning=guide_reasoning,
-        )
-        guide_metadata = guide_metadata_from_json(guide_metadata_raw)
+        guide_review_for_record = guide_review
 
     return make_record(
         source=source,
         guide=guide,
         init_response=init_response,
-        guide_response_system_prompt=guide_response_system_prompt,
+        guide_rewrite_prompt=guide_rewrite_prompt,
         guide_response=guide_response,
-        guide_metadata_prompt=guide_metadata_prompt,
-        guide_metadata=guide_metadata,
+        guide_review=guide_review_for_record,
     )
 
 
@@ -572,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate Constitutional AI datasets")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    generate = subparsers.add_parser("generate", help="generate guide-optimized preference JSONL data")
+    generate = subparsers.add_parser("generate", help="generate guide-rewritten preference JSONL data")
     generate.add_argument("--guide", type=Path, required=True)
     generate.add_argument("--output", type=Path, required=True)
     generate.add_argument("--dataset", default=DEFAULT_DATASET)
@@ -635,8 +609,20 @@ def _retry_sleep_seconds(attempt: int) -> float:
 
 def _non_empty_string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise DatasetError(f"guide metadata JSON field {label} must be a non-empty string")
+        raise DatasetError(f"guide rewrite JSON field {label} must be a non-empty string")
     return value.strip()
+
+
+def _string_value(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise DatasetError(f"guide rewrite JSON field {label} must be a string")
+    return value.strip()
+
+
+def _bool_value(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise DatasetError(f"guide rewrite JSON field {label} must be a boolean")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:

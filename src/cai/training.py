@@ -738,14 +738,20 @@ def normalize_messages_row(row: Mapping[str, object], spec: Mapping[str, object]
 
 
 def normalize_preference_row(row: Mapping[str, object], spec: Mapping[str, object]) -> dict[str, object]:
+    if row.get("preference_usable") is False:
+        raise TrainingError("preference row is marked unusable")
     chosen = row.get("chosen")
     rejected = row.get("rejected")
     if isinstance(chosen, str) and isinstance(rejected, str):
+        if chosen.strip() == rejected.strip():
+            raise TrainingError("chosen and rejected responses are identical")
         prompt = prompt_from_fields(row)
         chosen_messages = [assistant_message(chosen)]
         rejected_messages = [assistant_message(rejected)]
     else:
         prompt, chosen_messages, rejected_messages = split_preference_conversations(chosen, rejected, row)
+    if chosen_messages[-1]["content"] == rejected_messages[-1]["content"]:
+        raise TrainingError("chosen and rejected responses are identical")
     return {
         "prompt": prompt,
         "chosen": chosen_messages,

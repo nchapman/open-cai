@@ -12,7 +12,7 @@ example, but keeps the implementation intentionally simple and hackable.
 - Write a constitution as normal Markdown in `constitutions/*.md`.
 - Compile it into a human-reviewable guide in `constitutions/guides/*.guide.md`.
 - Generate data from Anthropic HH-RLHF harmless-base.
-- Pair a target model's initial answer with a stronger guide-following answer.
+- Pair a target model's initial answer with a guide-following rewrite of that answer.
 - Resume interrupted runs by skipping already generated source rows.
 
 ## Setup
@@ -77,8 +77,8 @@ uv run cai-dataset generate \
   --concurrency 16
 ```
 
-Split run with a local target model for rejected responses and an OpenRouter
-teacher for chosen responses:
+Split run with a local target model for initial responses and an OpenRouter
+teacher that evaluates and rewrites those responses:
 
 ```bash
 uv run cai-dataset generate \
@@ -99,10 +99,11 @@ Use `--max-samples -1` for the full harmless-base train split. Re-running the
 same command resumes against the same output file.
 
 Each output row includes the prompt, source HH-RLHF responses, generated initial
-response, guide-optimized response, SFT `messages`, DPO `chosen`/`rejected`
-message pairs, and comparison pairs for later analysis. Unless `--skip-metadata`
-is set, rows also include critique, change, and quality notes from a JSON schema
-response.
+response, guide rewrite prompt, revised guide-following response, SFT
+`messages`, DPO `chosen`/`rejected` message pairs, and comparison pairs for
+later analysis. The rewrite call uses a JSON schema response containing an
+alignment decision, reviewer comments, and an optional revision. Unless
+`--skip-metadata` is set, those review fields are stored in the row.
 
 ## Prepare Training Data
 
@@ -236,14 +237,14 @@ judge calls use bounded OpenRouter concurrency via `suite.judge.concurrency`.
 Model choices live in code rather than `.env`:
 
 - Guide compilation: `google/gemini-3.1-pro-preview`
-- Guide application: `deepseek/deepseek-v3.2`
+- Guide rewriting: `deepseek/deepseek-v3.2`
 
 The CLIs expose overrides for model, temperature, max tokens, reasoning effort,
 reasoning token budget, request timeout, retries, and provider base URLs.
 
-Structured model calls use JSON schema response formats. Freeform assistant
-responses are generated as normal chat completions with the reviewed guide in
-the system message.
+Structured model calls use JSON schema response formats. During data generation,
+the target model answers normally first; the guide model then evaluates and
+rewrites that answer instead of answering from scratch.
 
 ## License
 

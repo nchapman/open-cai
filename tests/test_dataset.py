@@ -14,15 +14,14 @@ from cai.dataset import (
     SourcePrompt,
     _chat_with_retries,
     _reasoning_from_args,
-    build_guide_metadata_prompt,
-    build_guide_system_prompt,
+    build_guide_rewrite_prompt,
     build_parser,
     completed_indices,
     extract_assistant_response,
     extract_human_prompt,
     generate_record,
-    guide_metadata_format,
-    guide_metadata_from_json,
+    guide_rewrite_format,
+    guide_rewrite_from_json,
     load_response_guide,
     load_source_prompts,
     make_record,
@@ -33,7 +32,7 @@ from cai.openrouter import DEFAULT_REQUEST_TIMEOUT, OpenRouterError
 class FakeClient:
     def __init__(self, responses: list[str] | None = None) -> None:
         self.calls = []
-        self.responses = responses or ["initial answer", "guided answer", json.dumps(sample_guide_metadata_payload())]
+        self.responses = responses or ["initial answer", json.dumps(sample_guide_review_payload())]
 
     def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((list(messages), kwargs))
@@ -65,11 +64,17 @@ def sample_guide() -> ResponseGuide:
     )
 
 
-def sample_guide_metadata_payload() -> dict[str, object]:
+def sample_guide_review_payload(*, aligned: bool = False) -> dict[str, object]:
+    if aligned:
+        return {
+            "aligned": True,
+            "comments": "The response already follows the guide.",
+            "revision": "",
+        }
     return {
-        "critique": "The response reveals private data.",
-        "changes_made": "Removed private data and preserved a safe alternative.",
-        "quality_notes": "The guide response better follows the privacy guidance.",
+        "aligned": False,
+        "comments": "The response reveals private data and needs a privacy-preserving alternative.",
+        "revision": "I cannot provide private data, but official channels may help.",
     }
 
 
@@ -122,33 +127,23 @@ class DatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(DatasetError, "empty"):
                 load_response_guide(path)
 
-    def test_guide_system_prompt_uses_complete_guide(self) -> None:
-        prompt = build_guide_system_prompt(sample_guide())
-
-        self.assertIn("Runtime framing", prompt)
-        self.assertIn("whether it is protective, balanced, permissive", prompt)
-        self.assertIn("more restrictive or more permissive", prompt)
-        self.assertIn("Privacy and consent", prompt)
-        self.assertIn("Do not repeat or quote", prompt)
-        self.assertIn("explicit about uncertainty", prompt)
-        self.assertIn("rubric labels", prompt)
-        self.assertIn("applicability text", prompt)
-        self.assertIn("Return only the final assistant message", prompt)
-
-    def test_guide_metadata_prompt_uses_complete_guide_and_responses(self) -> None:
-        prompt = build_guide_metadata_prompt(
+    def test_guide_rewrite_prompt_uses_initial_response_and_complete_guide(self) -> None:
+        prompt = build_guide_rewrite_prompt(
             sample_guide(),
             "Where does this actor live?",
             "Here is the address.",
-            "I cannot provide private data.",
         )
 
-        self.assertIn("audit the guided assistant response", prompt)
+        self.assertIn("Evaluate and revise", prompt)
+        self.assertIn("Decide whether the initial response follows the guide", prompt)
+        self.assertIn("set aligned to true and revision to an empty string", prompt)
+        self.assertIn("Preserve the initial response's voice", prompt)
         self.assertIn("Privacy and consent", prompt)
+        self.assertIn("Where does this actor live?", prompt)
         self.assertIn("Here is the address.", prompt)
-        self.assertIn("I cannot provide private data.", prompt)
-        self.assertIn('"quality_notes"', prompt)
-        self.assertNotIn('"guide_response"', prompt)
+        self.assertIn('"aligned"', prompt)
+        self.assertIn('"comments"', prompt)
+        self.assertIn('"revision"', prompt)
 
     def test_reads_completed_indices_for_split(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,25 +190,48 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(prompts[0].prompt, "Good row")
         self.assertEqual(prompts[1].source_chosen_response, "chosen 2")
 
-    def test_guide_metadata_format_uses_strict_json_schema(self) -> None:
-        response_format = guide_metadata_format()
+    def test_guide_rewrite_format_uses_strict_json_schema(self) -> None:
+        response_format = guide_rewrite_format()
 
         self.assertEqual(response_format["type"], "json_schema")
         self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
         self.assertEqual(response_format["json_schema"]["schema"]["additionalProperties"], False)  # type: ignore[index]
-        self.assertEqual(response_format["json_schema"]["name"], "guide_metadata")  # type: ignore[index]
+        self.assertEqual(response_format["json_schema"]["name"], "guide_rewrite")  # type: ignore[index]
 
-    def test_parses_structured_guide_metadata_result(self) -> None:
-        result = guide_metadata_from_json(json.dumps(sample_guide_metadata_payload()))
+    def test_parses_structured_guide_rewrite_result(self) -> None:
+        result = guide_rewrite_from_json(json.dumps(sample_guide_review_payload()))
 
-        self.assertEqual(result["changes_made"], "Removed private data and preserved a safe alternative.")
+        self.assertEqual(result["aligned"], False)
+        self.assertEqual(result["comments"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(result["revision"], "I cannot provide private data, but official channels may help.")
 
-    def test_rejects_unexpected_guide_metadata_fields(self) -> None:
-        payload = sample_guide_metadata_payload()
+    def test_parses_aligned_guide_rewrite_result_without_revision(self) -> None:
+        result = guide_rewrite_from_json(json.dumps(sample_guide_review_payload(aligned=True)))
+
+        self.assertEqual(result["aligned"], True)
+        self.assertEqual(result["comments"], "The response already follows the guide.")
+        self.assertEqual(result["revision"], "")
+
+    def test_rejects_unexpected_guide_rewrite_fields(self) -> None:
+        payload = sample_guide_review_payload()
         payload["unexpected"] = "unknown"
 
         with self.assertRaisesRegex(DatasetError, "unexpected"):
-            guide_metadata_from_json(json.dumps(payload))
+            guide_rewrite_from_json(json.dumps(payload))
+
+    def test_rejects_missing_revision_when_unaligned(self) -> None:
+        payload = sample_guide_review_payload()
+        payload["revision"] = ""
+
+        with self.assertRaisesRegex(DatasetError, "revision must be non-empty"):
+            guide_rewrite_from_json(json.dumps(payload))
+
+    def test_rejects_revision_when_aligned(self) -> None:
+        payload = sample_guide_review_payload(aligned=True)
+        payload["revision"] = "Edited response"
+
+        with self.assertRaisesRegex(DatasetError, "revision must be empty"):
+            guide_rewrite_from_json(json.dumps(payload))
 
     def test_generate_reasoning_defaults_do_not_block_token_budget_override(self) -> None:
         parser = build_parser()
@@ -239,19 +257,20 @@ class DatasetTests(unittest.TestCase):
             source=sample_source(),
             guide=sample_guide(),
             init_response="bad answer",
-            guide_response_system_prompt="guide response system prompt",
+            guide_rewrite_prompt="guide rewrite prompt",
             guide_response="I cannot provide private data, but official channels may help.",
-            guide_metadata_prompt="guide metadata prompt",
-            guide_metadata=sample_guide_metadata_payload(),
+            guide_review=sample_guide_review_payload(),
         )
 
         self.assertEqual(record["chosen"][1]["content"], "I cannot provide private data, but official channels may help.")  # type: ignore[index]
         self.assertEqual(record["rejected"][1]["content"], "bad answer")  # type: ignore[index]
         self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
-        self.assertEqual(record["changes_made"], "Removed private data and preserved a safe alternative.")
+        self.assertEqual(record["aligned"], False)
+        self.assertEqual(record["comments"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(record["revision"], "I cannot provide private data, but official channels may help.")
+        self.assertEqual(record["preference_usable"], True)
         self.assertEqual(record["metadata_included"], True)
-        self.assertEqual(record["guide_response_system_prompt"], "guide response system prompt")
-        self.assertEqual(record["guide_metadata_prompt"], "guide metadata prompt")
+        self.assertEqual(record["guide_rewrite_prompt"], "guide rewrite prompt")
         self.assertEqual(record["source_chosen_response"], "source chosen answer")
         self.assertEqual(record["source_rejected_response"], "source rejected answer")
         self.assertEqual(
@@ -268,24 +287,25 @@ class DatasetTests(unittest.TestCase):
             source=sample_source(),
             guide=sample_guide(),
             init_response="initial answer",
-            guide_response_system_prompt="guide response system prompt",
+            guide_rewrite_prompt="guide rewrite prompt",
             guide_response="guided answer",
-            guide_metadata_prompt="guide metadata prompt",
-            guide_metadata=sample_guide_metadata_payload(),
+            guide_review=sample_guide_review_payload(),
         )
 
         self.assertEqual(record["chosen"][1]["content"], "guided answer")  # type: ignore[index]
         self.assertEqual(record["rejected"][1]["content"], "initial answer")  # type: ignore[index]
 
-    def test_generate_record_runs_initial_guide_and_metadata_sequence(self) -> None:
-        client = FakeClient(["initial answer", "guided answer", json.dumps(sample_guide_metadata_payload())])
+    def test_generate_record_runs_initial_and_rewrite_sequence(self) -> None:
+        client = FakeClient(["initial answer", json.dumps(sample_guide_review_payload())])
         source = sample_source("Unsafe request")
 
         record = generate_record(init_client=client, guide_client=client, source=source, guide=sample_guide())
 
         self.assertEqual(record["init_response"], "initial answer")
-        self.assertEqual(record["guide_response"], "guided answer")
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
+        self.assertEqual(record["aligned"], False)
+        self.assertEqual(record["comments"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(len(client.calls), 2)
         self.assertEqual(
             client.calls[0][0],
             [
@@ -293,21 +313,18 @@ class DatasetTests(unittest.TestCase):
                 {"role": "user", "content": "Unsafe request"},
             ],
         )
-        self.assertEqual(client.calls[1][0][0]["role"], "system")
+        self.assertEqual(client.calls[1][0][0]["role"], "user")
         self.assertIn("Response guide", client.calls[1][0][0]["content"])
-        self.assertEqual(client.calls[1][0][1], {"role": "user", "content": "Unsafe request"})
-        self.assertIsNone(client.calls[1][1]["response_format"])
-        self.assertIn("audit the guided assistant response", client.calls[2][0][0]["content"])
-        self.assertIn("guided answer", client.calls[2][0][0]["content"])
+        self.assertIn("Initial assistant response:\ninitial answer", client.calls[1][0][0]["content"])
+        self.assertEqual(client.calls[1][1]["response_format"]["type"], "json_schema")
+        self.assertEqual(client.calls[1][1]["response_format"]["json_schema"]["name"], "guide_rewrite")
         self.assertEqual(client.calls[0][1]["model"], GUIDE_APPLICATION_MODEL)
         self.assertEqual(client.calls[0][1]["reasoning"], GUIDE_APPLICATION_REASONING)
         self.assertEqual(client.calls[0][1]["temperature"], DEFAULT_TEMPERATURE)
         self.assertEqual(client.calls[0][1]["max_tokens"], 6000)
-        self.assertEqual(client.calls[2][1]["response_format"]["type"], "json_schema")
-        self.assertEqual(client.calls[2][1]["response_format"]["json_schema"]["name"], "guide_metadata")
 
-    def test_generate_record_can_skip_metadata_for_plain_chat_endpoints(self) -> None:
-        client = FakeClient(["initial answer", "guided answer"])
+    def test_generate_record_can_omit_rewrite_metadata_from_record(self) -> None:
+        client = FakeClient(["initial answer", json.dumps(sample_guide_review_payload())])
         source = sample_source("Unsafe request")
 
         record = generate_record(
@@ -319,11 +336,25 @@ class DatasetTests(unittest.TestCase):
         )
 
         self.assertEqual(record["init_response"], "initial answer")
-        self.assertEqual(record["guide_response"], "guided answer")
+        self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["metadata_included"], False)
-        self.assertIsNone(record["critique"])
-        self.assertEqual(record["guide_metadata_prompt"], "")
+        self.assertIsNone(record["aligned"])
+        self.assertIsNone(record["comments"])
+        self.assertIsNone(record["revision"])
         self.assertEqual(len(client.calls), 2)
+
+    def test_generate_record_preserves_aligned_initial_response(self) -> None:
+        client = FakeClient(["initial answer", json.dumps(sample_guide_review_payload(aligned=True))])
+        source = sample_source("Safe request")
+
+        record = generate_record(init_client=client, guide_client=client, source=source, guide=sample_guide())
+
+        self.assertEqual(record["guide_response"], "initial answer")
+        self.assertEqual(record["chosen"][1]["content"], "initial answer")  # type: ignore[index]
+        self.assertEqual(record["rejected"][1]["content"], "initial answer")  # type: ignore[index]
+        self.assertEqual(record["aligned"], True)
+        self.assertEqual(record["revision"], "")
+        self.assertEqual(record["preference_usable"], False)
 
     def test_local_base_url_disables_default_reasoning_payload(self) -> None:
         parser = build_parser()
