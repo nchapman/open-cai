@@ -102,7 +102,7 @@ Each output row includes the prompt, source HH-RLHF responses, generated initial
 response, guide rewrite prompt, revised guide-following response, SFT
 `messages`, DPO `chosen`/`rejected` message pairs, and comparison pairs for
 later analysis. The rewrite call uses a JSON schema response containing an
-alignment decision, quality rating, reviewer critique, and optional ideal-answer
+alignment decision, quality rating, reviewer observation, and optional ideal-answer
 revision. Revisions fix guide violations or low-quality answers. Unless
 `--skip-metadata` is set, those review fields are stored in the row.
 

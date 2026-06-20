@@ -71,20 +71,20 @@ def sample_guide_review_payload(*, aligned: bool = False, improved: bool = False
         return {
             "aligned": True,
             "quality": "low",
-            "critique": "The response follows the guide but is too vague to be ideal.",
+            "observation": "The response follows the guide but is too vague to be ideal.",
             "revision": "A clearer, more useful answer.",
         }
     if aligned:
         return {
             "aligned": True,
             "quality": "high",
-            "critique": "The response already follows the guide.",
+            "observation": "The response already follows the guide.",
             "revision": "",
         }
     return {
         "aligned": False,
         "quality": "low",
-        "critique": "The response reveals private data and needs a privacy-preserving alternative.",
+        "observation": "The response reveals private data and needs a privacy-preserving alternative.",
         "revision": "I cannot provide private data, but official channels may help.",
     }
 
@@ -146,9 +146,18 @@ class DatasetTests(unittest.TestCase):
         )
 
         self.assertIn("evaluate and revise", prompt)
-        self.assertIn("aligned is only about guide boundary violations", prompt)
-        self.assertIn("Missing depth, usefulness, or substantive discussion is quality", prompt)
+        self.assertIn("aligned is only about clear guide boundary violations", prompt)
+        self.assertIn("Do not set aligned to false for minor wording", prompt)
+        self.assertIn("Missing depth, usefulness, substantive discussion, or ideal style is quality", prompt)
         self.assertIn("quality is about usefulness and execution", prompt)
+        self.assertIn("acceptable but imperfect", prompt)
+        self.assertIn("If observation says the response remains aligned, aligned must be true", prompt)
+        self.assertIn("If the whole user request crosses a guide boundary", prompt)
+        self.assertIn("Do not treat a benign alternative as recreating risk", prompt)
+        self.assertIn("Safe redirection, prevention advice, support resources", prompt)
+        self.assertIn("Match the intensity of the revision to the strength of the guide language", prompt)
+        self.assertIn("Use the smallest correction that fixes the actual problem", prompt)
+        self.assertIn("concise means no unnecessary expansion", prompt)
         self.assertIn("Do not apply your own default safety policy", prompt)
         self.assertIn("Write a revision only when aligned is false or quality is low", prompt)
         self.assertIn("Leave revision empty when aligned is true and quality is medium or high", prompt)
@@ -163,8 +172,11 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("Here is the address.", prompt)
         self.assertIn('"aligned"', prompt)
         self.assertIn('"quality"', prompt)
-        self.assertIn('"critique"', prompt)
+        self.assertIn('"observation"', prompt)
         self.assertIn('"revision"', prompt)
+        self.assertLess(prompt.index('"observation"'), prompt.index('"aligned"'))
+        self.assertLess(prompt.index('"aligned"'), prompt.index('"quality"'))
+        self.assertLess(prompt.index('"quality"'), prompt.index('"revision"'))
         self.assertLess(prompt.index("Response guide:"), prompt.index("Editing objective:"))
         self.assertLess(prompt.index("Initial assistant response:"), prompt.index("Editing objective:"))
 
@@ -179,6 +191,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(messages[0]["content"], GUIDE_REWRITE_SYSTEM_PROMPT)
         self.assertIn("neutral alignment editor", messages[0]["content"])
         self.assertIn("faithfully apply only the provided response guide", messages[0]["content"])
+        self.assertIn("Prefer leaving acceptable responses unchanged", messages[0]["content"])
         self.assertNotIn("uncensored", messages[0]["content"])
         self.assertEqual(messages[1]["role"], "user")
         self.assertIn("Response guide:", messages[1]["content"])
@@ -236,13 +249,17 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(response_format["json_schema"]["strict"], True)  # type: ignore[index]
         self.assertEqual(response_format["json_schema"]["schema"]["additionalProperties"], False)  # type: ignore[index]
         self.assertEqual(response_format["json_schema"]["name"], "guide_rewrite")  # type: ignore[index]
+        self.assertEqual(
+            response_format["json_schema"]["schema"]["required"],  # type: ignore[index]
+            ["observation", "aligned", "quality", "revision"],
+        )
 
     def test_parses_structured_guide_rewrite_result(self) -> None:
         result = guide_rewrite_from_json(json.dumps(sample_guide_review_payload()))
 
         self.assertEqual(result["aligned"], False)
         self.assertEqual(result["quality"], "low")
-        self.assertEqual(result["critique"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(result["observation"], "The response reveals private data and needs a privacy-preserving alternative.")
         self.assertEqual(result["revision"], "I cannot provide private data, but official channels may help.")
 
     def test_parses_aligned_guide_rewrite_result_without_revision(self) -> None:
@@ -250,7 +267,7 @@ class DatasetTests(unittest.TestCase):
 
         self.assertEqual(result["aligned"], True)
         self.assertEqual(result["quality"], "high")
-        self.assertEqual(result["critique"], "The response already follows the guide.")
+        self.assertEqual(result["observation"], "The response already follows the guide.")
         self.assertEqual(result["revision"], "")
 
     def test_parses_aligned_guide_rewrite_result_with_quality_revision(self) -> None:
@@ -258,7 +275,7 @@ class DatasetTests(unittest.TestCase):
 
         self.assertEqual(result["aligned"], True)
         self.assertEqual(result["quality"], "low")
-        self.assertEqual(result["critique"], "The response follows the guide but is too vague to be ideal.")
+        self.assertEqual(result["observation"], "The response follows the guide but is too vague to be ideal.")
         self.assertEqual(result["revision"], "A clearer, more useful answer.")
 
     def test_rejects_unexpected_guide_rewrite_fields(self) -> None:
@@ -331,7 +348,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["aligned"], False)
         self.assertEqual(record["quality"], "low")
-        self.assertEqual(record["critique"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(record["observation"], "The response reveals private data and needs a privacy-preserving alternative.")
         self.assertEqual(record["revision"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["preference_usable"], True)
         self.assertEqual(record["metadata_included"], True)
@@ -370,7 +387,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["guide_response"], "I cannot provide private data, but official channels may help.")
         self.assertEqual(record["aligned"], False)
         self.assertEqual(record["quality"], "low")
-        self.assertEqual(record["critique"], "The response reveals private data and needs a privacy-preserving alternative.")
+        self.assertEqual(record["observation"], "The response reveals private data and needs a privacy-preserving alternative.")
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(DEFAULT_ASSISTANT_SYSTEM_PROMPT, "You are Cai. Answer the user's request naturally.")
         self.assertNotIn("unbiased", DEFAULT_ASSISTANT_SYSTEM_PROMPT)
@@ -409,7 +426,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(record["metadata_included"], False)
         self.assertIsNone(record["aligned"])
         self.assertIsNone(record["quality"])
-        self.assertIsNone(record["critique"])
+        self.assertIsNone(record["observation"])
         self.assertIsNone(record["revision"])
         self.assertEqual(len(client.calls), 2)
 

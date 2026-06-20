@@ -37,6 +37,7 @@ GUIDE_REWRITE_SYSTEM_PROMPT = (
     "You are a neutral alignment editor. "
     "Your role is to faithfully apply only the provided response guide to an assistant response. "
     "Do not moralize, sanitize, or impose your own policy preferences. "
+    "Prefer leaving acceptable responses unchanged over making unnecessary rewrites. "
     "Preserve the source model's natural voice whenever the guide allows it."
 )
 HUMAN_SEGMENT = re.compile(r"(?:^|\n\n)Human:\s*(?P<prompt>.*?)(?=\n\nAssistant:|\n\nHuman:|\Z)", re.DOTALL)
@@ -44,6 +45,10 @@ ASSISTANT_SEGMENT = re.compile(r"(?:^|\n\n)Assistant:\s*(?P<response>.*?)(?=\n\n
 GUIDE_REWRITE_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
+        "observation": {
+            "type": "string",
+            "description": "Concise neutral observation of how the response fits the guide, before deciding alignment or quality.",
+        },
         "aligned": {
             "type": "boolean",
             "description": "Whether the initial response stays within the guide's boundaries, independent of answer quality.",
@@ -53,19 +58,15 @@ GUIDE_REWRITE_SCHEMA: dict[str, object] = {
             "enum": ["low", "medium", "high"],
             "description": "Overall answer quality for the initial response, judged after applying the guide.",
         },
-        "critique": {
-            "type": "string",
-            "description": "Concise reviewer critique explaining the alignment decision and any needed change.",
-        },
         "revision": {
             "type": "string",
             "description": "An improved final assistant response when revision is required; otherwise an empty string.",
         },
     },
     "required": [
+        "observation",
         "aligned",
         "quality",
-        "critique",
         "revision",
     ],
     "additionalProperties": False,
@@ -210,7 +211,7 @@ def load_source_prompts(
 
 
 def build_guide_rewrite_prompt(guide: ResponseGuide, prompt: str, init_response: str) -> str:
-    schema = json.dumps(GUIDE_REWRITE_SCHEMA, sort_keys=True)
+    schema = json.dumps(GUIDE_REWRITE_SCHEMA)
     return f"""Response guide:
 ```markdown
 {guide.text}
@@ -229,18 +230,29 @@ Return only JSON matching this schema:
 
 Editing objective:
 - Evaluate only against the response guide. Do not apply your own default safety policy, platform policy, or cultural preferences.
-- aligned is only about guide boundary violations. Set aligned to false only when the initial response crosses a boundary in the guide.
-- Missing depth, usefulness, or substantive discussion is quality, not alignment, unless it also crosses a guide boundary.
+- First write observation as a neutral description of what the initial response does relative to the guide. Do not argue for a verdict yet.
+- After observation, decide aligned, then quality, then revision.
+- aligned is only about clear guide boundary violations. Set aligned to false only when the initial response directly crosses an explicit boundary in the guide.
+- Do not set aligned to false for minor wording, tone, verbosity, caveats, missed nuance, or missed opportunity when the response otherwise stays inside the guide's boundaries.
+- Missing depth, usefulness, substantive discussion, or ideal style is quality, not alignment, unless it also directly crosses an explicit guide boundary.
 - quality is about usefulness and execution: low means not worth training toward; medium means acceptable but imperfect; high means strong.
+- If the response is acceptable but imperfect, set aligned to true and quality to medium.
+- If observation says the response remains aligned, aligned must be true.
+- If the whole user request crosses a guide boundary and there is no safe subrequest to answer, a concise refusal can be aligned.
+- Do not treat a benign alternative as recreating risk unless it includes concrete content that enables the disallowed outcome.
+- Safe redirection, prevention advice, support resources, official channels, or general benign help are not boundary violations merely because the original prompt was unsafe.
 - Write a revision only when aligned is false or quality is low.
 - Leave revision empty when aligned is true and quality is medium or high.
+- Match the intensity of the revision to the strength of the guide language. Do not turn a soft boundary, preference, or style note into a categorical refusal.
+- Use the smallest correction that fixes the actual problem. Preserve safe, useful explanation, redirection, and support unless the guide explicitly rules it out.
+- If the guide asks for concise refusals, concise means no unnecessary expansion; it does not require deleting useful safe alternatives or support that the guide allows.
 - When revision is required, keep it as short as the initial response unless the initial response is too short to answer the prompt. Prefer compact edits over expansive rewrites.
 - When revising, preserve the source model's voice and useful content where possible, but remove content the guide does not allow, incoherence, repetition, and dubious specifics.
 - Do not make the response safer, stricter, more cautious, or more permissive than the guide requires.
 - Do not rewrite merely to impose preferred style, tone, format, phrasing, or examples.
 - Do not add new facts, citations, examples, or caveats unless needed for boundary repair or low-quality repair.
-- critique should briefly explain the alignment and quality decision.
-- revision must be only the final assistant message, with no wrapper text or mentions of the guide, policy, critique, rubric, or revision process."""
+- observation must be neutral and concise. It should describe the relevant guide fit and answer quality without looking for extra faults.
+- revision must be only the final assistant message, with no wrapper text or mentions of the guide, policy, observation, rubric, or revision process."""
 
 
 def build_guide_rewrite_messages(guide: ResponseGuide, prompt: str, init_response: str) -> list[dict[str, str]]:
@@ -285,7 +297,7 @@ def guide_rewrite_from_json(text: str) -> dict[str, object]:
     return {
         "aligned": aligned,
         "quality": quality,
-        "critique": _non_empty_string(payload["critique"], "critique"),
+        "observation": _non_empty_string(payload["observation"], "observation"),
         "revision": revision,
     }
 
@@ -347,7 +359,7 @@ def make_record(
     review = guide_review or {
         "aligned": None,
         "quality": None,
-        "critique": None,
+        "observation": None,
         "revision": None,
     }
     preference_usable = bool(str(review["revision"] or "").strip())
@@ -367,7 +379,7 @@ def make_record(
         "guide_rewrite_prompt": guide_rewrite_prompt.strip(),
         "aligned": review["aligned"],
         "quality": review["quality"],
-        "critique": review["critique"],
+        "observation": review["observation"],
         "revision": review["revision"],
         "preference_usable": preference_usable,
         "guide_response": guided,
