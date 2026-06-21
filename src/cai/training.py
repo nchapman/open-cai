@@ -576,6 +576,7 @@ def prepare_section(
     sample_counts = resolve_sample_counts(dataset_specs, section.get("total_samples"))
     prepared: list[dict[str, object]] = []
     skipped = 0
+    skipped_unusable_preferences = 0
     for index, raw_spec in enumerate(dataset_specs):
         spec = dict(raw_spec)
         view = _string_config(spec.get("view", expected_view), f"{section_name}.datasets[{index}].view")
@@ -593,6 +594,9 @@ def prepare_section(
             except TrainingError as exc:
                 label = dataset_label(spec)
                 skipped += 1
+                if expected_view == "preference" and str(exc) == "preference row is marked unusable":
+                    skipped_unusable_preferences += 1
+                    continue
                 print(f"skipping {section_name} row from {label} at sampled row {row_number}: {exc}", file=sys.stderr)
                 continue
             dataset_prepared += 1
@@ -600,8 +604,11 @@ def prepare_section(
             raise TrainingError(f"{dataset_label(spec)} produced no valid {section_name} rows")
 
     random.Random(seed).shuffle(prepared)
-    if skipped:
-        print(f"skipped {skipped} malformed {section_name} rows", file=sys.stderr)
+    malformed = skipped - skipped_unusable_preferences
+    if skipped_unusable_preferences:
+        print(f"skipped {skipped_unusable_preferences} unusable {section_name} rows", file=sys.stderr)
+    if malformed:
+        print(f"skipped {malformed} malformed {section_name} rows", file=sys.stderr)
     return prepared
 
 
