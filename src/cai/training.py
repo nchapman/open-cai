@@ -80,7 +80,7 @@ def run_sft_from_config(
 
     train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
     eval_path_value = data_config.get("eval_path")
-    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
+    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None and eval_is_enabled(training_config) else None
     train_rows = load_sft_messages(train_path)
     eval_rows = load_sft_messages(eval_path) if eval_path is not None else []
     dropped_train_rows = 0
@@ -100,8 +100,9 @@ def run_sft_from_config(
     if _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"):
         tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=sft_config.get("chat_template_path"))
         max_length = _int_config(sft_config.get("max_length", 1024), "sft.max_length")
-        train_rows, dropped_train_rows = drop_overlength_sft_rows(train_rows, tokenizer, max_length=max_length)
-        eval_rows, dropped_eval_rows = drop_overlength_sft_rows(eval_rows, tokenizer, max_length=max_length)
+        num_proc = dataset_num_proc(training_config)
+        train_rows, dropped_train_rows = drop_overlength_sft_rows(train_rows, tokenizer, max_length=max_length, num_proc=num_proc)
+        eval_rows, dropped_eval_rows = drop_overlength_sft_rows(eval_rows, tokenizer, max_length=max_length, num_proc=num_proc)
         if not train_rows:
             raise TrainingError("SFT train dataset is empty after dropping overlength rows")
     peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
@@ -168,7 +169,7 @@ def run_dpo_from_config(
 
     train_path = Path(_string_config(data_config.get("train_path"), "data.train_path"))
     eval_path_value = data_config.get("eval_path")
-    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None else None
+    eval_path = Path(_string_config(eval_path_value, "data.eval_path")) if eval_path_value is not None and eval_is_enabled(training_config) else None
     train_rows = load_dpo_preferences(train_path)
     eval_rows = load_dpo_preferences(eval_path) if eval_path is not None else []
     dropped_train_rows = 0
@@ -189,8 +190,9 @@ def run_dpo_from_config(
     if _bool_config(data_config.get("drop_overlength", False), "data.drop_overlength"):
         tokenizer = load_length_tokenizer(model_config, model_name, chat_template_path=model_config.get("chat_template_path"))
         max_length = _int_config(dpo_config.get("max_length", 1024), "dpo.max_length")
-        train_rows, dropped_train_rows = drop_overlength_dpo_rows(train_rows, tokenizer, max_length=max_length)
-        eval_rows, dropped_eval_rows = drop_overlength_dpo_rows(eval_rows, tokenizer, max_length=max_length)
+        num_proc = dataset_num_proc(training_config)
+        train_rows, dropped_train_rows = drop_overlength_dpo_rows(train_rows, tokenizer, max_length=max_length, num_proc=num_proc)
+        eval_rows, dropped_eval_rows = drop_overlength_dpo_rows(eval_rows, tokenizer, max_length=max_length, num_proc=num_proc)
         if not train_rows:
             raise TrainingError("DPO train dataset is empty after dropping overlength rows")
     peft_config = dict(_mapping_config(config.get("peft", {}), "peft"))
@@ -359,7 +361,29 @@ def drop_overlength_sft_rows(
     tokenizer: object,
     *,
     max_length: int,
+    num_proc: int = 1,
 ) -> tuple[list[dict[str, object]], int]:
+    if num_proc > 1 and rows:
+        try:
+            from datasets import Dataset
+        except ImportError as exc:
+            raise TrainingError("parallel length filtering requires optional deps; run `uv sync --extra train`") from exc
+
+        dataset = Dataset.from_list(list(rows))
+
+        def add_keep_flag(batch: Mapping[str, Sequence[object]]) -> dict[str, list[bool]]:
+            return {
+                "_keep": [
+                    len(tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False)) <= max_length
+                    for messages in batch["messages"]
+                ]
+            }
+
+        filtered = dataset.map(add_keep_flag, batched=True, num_proc=num_proc, desc="Filtering overlength SFT rows")
+        filtered = filtered.filter(lambda keep: keep, input_columns="_keep", num_proc=num_proc, desc="Keeping SFT rows")
+        kept_rows = [{"messages": row["messages"]} for row in filtered.remove_columns("_keep").to_list()]
+        return kept_rows, len(rows) - len(kept_rows)
+
     kept = []
     dropped = 0
     for row in rows:
@@ -375,7 +399,32 @@ def drop_overlength_dpo_rows(
     tokenizer: object,
     *,
     max_length: int,
+    num_proc: int = 1,
 ) -> tuple[list[dict[str, object]], int]:
+    if num_proc > 1 and rows:
+        try:
+            from datasets import Dataset
+        except ImportError as exc:
+            raise TrainingError("parallel length filtering requires optional deps; run `uv sync --extra train`") from exc
+
+        dataset = Dataset.from_list(list(rows))
+
+        def add_keep_flag(batch: Mapping[str, Sequence[object]]) -> dict[str, list[bool]]:
+            keep = []
+            for prompt, chosen, rejected in zip(batch["prompt"], batch["chosen"], batch["rejected"], strict=True):
+                chosen_length = len(tokenizer.apply_chat_template(prompt + chosen, tokenize=True, return_dict=False))
+                rejected_length = len(tokenizer.apply_chat_template(prompt + rejected, tokenize=True, return_dict=False))
+                keep.append(max(chosen_length, rejected_length) <= max_length)
+            return {"_keep": keep}
+
+        filtered = dataset.map(add_keep_flag, batched=True, num_proc=num_proc, desc="Filtering overlength DPO rows")
+        filtered = filtered.filter(lambda keep: keep, input_columns="_keep", num_proc=num_proc, desc="Keeping DPO rows")
+        kept_rows = [
+            {"prompt": row["prompt"], "chosen": row["chosen"], "rejected": row["rejected"]}
+            for row in filtered.remove_columns("_keep").to_list()
+        ]
+        return kept_rows, len(rows) - len(kept_rows)
+
     kept = []
     dropped = 0
     for row in rows:
@@ -388,6 +437,20 @@ def drop_overlength_dpo_rows(
             continue
         kept.append(row)
     return kept, dropped
+
+
+def eval_is_enabled(training_config: Mapping[str, object]) -> bool:
+    if "eval_strategy" not in training_config and "evaluation_strategy" not in training_config:
+        return True
+    strategy = training_config.get("eval_strategy", training_config.get("evaluation_strategy"))
+    return str(strategy).lower() not in {"no", "none", "false"}
+
+
+def dataset_num_proc(training_config: Mapping[str, object]) -> int:
+    value = training_config.get("dataset_num_proc", 1)
+    if value is None:
+        return 1
+    return max(1, _int_config(value, "training.dataset_num_proc"))
 
 
 def summarize_lengths(values: Sequence[int], *, caps: Sequence[int]) -> dict[str, object]:

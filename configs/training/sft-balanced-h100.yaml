@@ -9,6 +9,7 @@ model:
 data:
   train_path: data/training/balanced/sft/train.jsonl
   eval_path: data/training/balanced/sft/test.jsonl
+  drop_overlength: true
 
 training:
   per_device_train_batch_size: 2
@@ -23,18 +24,16 @@ training:
   bf16: true
   fp16: false
   tf32: true
-  gradient_checkpointing: true
-  gradient_checkpointing_kwargs:
-    use_reentrant: false
-  dataset_num_proc: 4
-  dataloader_num_workers: 2
+  gradient_checkpointing: false
+  dataset_num_proc: 8
+  dataloader_num_workers: 4
   report_to: none
   loss_type: chunked_nll
 
 sft:
   chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
   eos_token: <|im_end|>
-  max_length: 8192
+  max_length: 4096
   packing: false
   assistant_only_loss: true
 

@@ -197,17 +197,21 @@ uv run --extra train cai-train lengths --config configs/training/dpo-protective.
 ```
 
 These preflight checks tokenize the prepared rows with the configured chat
-template. SFT uses an `8192` token cap, which covers the current balanced SFT
-split. DPO uses a `2048` token cap with `data.drop_overlength: true`; overlength
-pairs are excluded instead of being truncated, and the command reports the
-counts.
+template. SFT uses a `4096` token cap with `data.drop_overlength: true`, which
+keeps nearly all current rows while avoiding the slow 8192-token path. DPO uses
+a `2048` token cap with `data.drop_overlength: true`; overlength rows are
+excluded instead of being truncated, and the command reports the counts.
 
 On a single H100 RunPod, train a constitution with:
 
 ```bash
-uv run --extra train cai-train sft --config configs/training/sft-protective.yaml
-uv run --extra train cai-train dpo --config configs/training/dpo-protective.yaml
+uv run --extra train cai-train sft --config configs/training/sft-balanced-h100.yaml
+uv run --extra train cai-train dpo --config configs/training/dpo-balanced-h100.yaml
 ```
+
+The H100 SFT config uses a 4096-token cap, drops overlength rows, disables
+gradient checkpointing, and keeps the batch size low enough to survive long
+4096-token rows.
 
 The available full-run configs are:
 
