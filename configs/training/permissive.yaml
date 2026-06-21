@@ -1,6 +1,6 @@
 seed: 42
 test_ratio: 0.02
-output_dir: data/training/balanced
+output_dir: data/training/permissive
 
 sft:
   datasets:
@@ -12,7 +12,7 @@ sft:
       samples: 60000
 
     - source: local
-      path: data/generated/balanced-observation-v1-full.jsonl
+      path: data/generated/permissive-observation-v1-full.jsonl
       view: messages
       samples: 10000
 
@@ -22,9 +22,9 @@ dpo:
       id: argilla/ultrafeedback-binarized-preferences-cleaned
       split: train
       view: preference
-      samples: 9000
+      samples: 5000
 
     - source: local
-      path: data/generated/balanced-observation-v1-full.jsonl
+      path: data/generated/permissive-observation-v1-full.jsonl
       view: preference
       samples: 42520

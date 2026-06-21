@@ -118,13 +118,13 @@ Smoke test the prep pipeline:
 uv run cai-train prepare --config configs/training/smoke.yaml
 ```
 
-Prepare the balanced mix:
+Prepare a training mix:
 
 ```bash
-uv run cai-train prepare --config configs/training/balanced.yaml
+uv run cai-train prepare --config configs/training/protective.yaml
 ```
 
-The default balanced config uses:
+The constitution configs use:
 
 - SFT: `HuggingFaceTB/smoltalk` / `smol-magpie-ultra` plus local CAI `messages`
 - DPO: cleaned UltraFeedback plus local CAI `chosen` / `rejected`
@@ -140,6 +140,23 @@ dpo/test.jsonl
 
 SFT rows use `messages`. DPO rows use explicit conversational `prompt`,
 `chosen`, and `rejected` fields for TRL compatibility.
+
+Full generated CAI datasets are available as compressed JSONL in:
+
+```text
+nchapman/open-cai-generated-transfer
+```
+
+Download them into `data/generated/` before preparing training data:
+
+```bash
+uv run hf download nchapman/open-cai-generated-transfer \
+  --repo-type dataset \
+  --local-dir data/generated \
+  --include '*-observation-v1-full.jsonl.gz'
+
+gunzip -k data/generated/*-observation-v1-full.jsonl.gz
+```
 
 ## Train
 
@@ -172,11 +189,11 @@ prefix-preserving Qwen chat template so TRL can split prompt and completion
 tokens cleanly.
 
 The smoke configs intentionally use small limits for quick validation. For the
-balanced training data, use the full training configs:
+full training data, use the constitution configs:
 
 ```bash
-uv run --extra train cai-train lengths --config configs/training/sft-balanced.yaml --fail-on-truncation
-uv run --extra train cai-train lengths --config configs/training/dpo-balanced.yaml --fail-on-truncation
+uv run --extra train cai-train lengths --config configs/training/sft-protective.yaml --fail-on-truncation
+uv run --extra train cai-train lengths --config configs/training/dpo-protective.yaml --fail-on-truncation
 ```
 
 These preflight checks tokenize the prepared rows with the configured chat
@@ -184,6 +201,19 @@ template. SFT uses an `8192` token cap, which covers the current balanced SFT
 split. DPO uses a `2048` token cap with `data.drop_overlength: true`; overlength
 pairs are excluded instead of being truncated, and the command reports the
 counts.
+
+On a single H100 RunPod, train a constitution with:
+
+```bash
+uv run --extra train cai-train sft --config configs/training/sft-protective.yaml
+uv run --extra train cai-train dpo --config configs/training/dpo-protective.yaml
+```
+
+The available full-run configs are:
+
+- `protective.yaml`, `sft-protective.yaml`, `dpo-protective.yaml`
+- `balanced.yaml`, `sft-balanced-h100.yaml`, `dpo-balanced-h100.yaml`
+- `permissive.yaml`, `sft-permissive.yaml`, `dpo-permissive.yaml`
 
 For two local GPUs, launch training through Accelerate:
 
