@@ -12,8 +12,6 @@ dependencies = [
 [project.optional-dependencies]
 eval = [
     "accelerate>=1.10.0",
-    "causal-conv1d>=1.6.2.post1",
-    "flash-linear-attention>=0.5.1",
     "immutabledict>=4.2.0",
     "langdetect>=1.0.9",
     "lm-eval[hf]>=0.4.0",

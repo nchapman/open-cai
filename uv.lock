@@ -230,8 +230,6 @@ dependencies = [
 [package.optional-dependencies]
 eval = [
     { name = "accelerate" },
-    { name = "causal-conv1d" },
-    { name = "flash-linear-attention" },
     { name = "immutabledict" },
     { name = "langdetect" },
     { name = "lm-eval", extra = ["hf"] },
@@ -254,10 +252,8 @@ train = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'eval'", specifier = ">=1.10.0" },
     { name = "accelerate", marker = "extra == 'train'", specifier = ">=1.10.0" },
-    { name = "causal-conv1d", marker = "extra == 'eval'", specifier = ">=1.6.2.post1" },
     { name = "causal-conv1d", marker = "extra == 'train'", specifier = ">=1.6.2.post1" },
     { name = "datasets", specifier = ">=3.0.0" },
-    { name = "flash-linear-attention", marker = "extra == 'eval'", specifier = ">=0.5.1" },
     { name = "flash-linear-attention", marker = "extra == 'train'", specifier = ">=0.5.1" },
     { name = "immutabledict", marker = "extra == 'eval'", specifier = ">=4.2.0" },
     { name = "langdetect", marker = "extra == 'eval'", specifier = ">=1.0.9" },

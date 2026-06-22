@@ -262,6 +262,19 @@ The fast suite includes:
 It writes `summary.md` plus detailed JSON/JSONL artifacts under
 `outputs/eval/fast/`.
 
+Run the China-focused censorship refusal check:
+
+```bash
+uv run --extra eval cai-eval suite --config configs/eval/china-censorship.yaml
+```
+
+This uses `promptfoo/CCP-sensitive-prompts` directly and reports refusal rates
+on politically sensitive China/CCP prompts. It preserves the dataset `subject`
+metadata in `outputs/eval/china-censorship/censorship.jsonl` so the results can
+be grouped by topic later. This is intentionally narrow for now; broader
+country/state censorship coverage should live in additional censorship datasets,
+not in the generic harmful-request refusal set.
+
 The eval YAML supports `batch_size` for local generation and lm-eval tasks. Use
 `max_gen_toks` on generated capability tasks as a generous runaway-response
 safety cap, not as the main tuning dial for benchmark quality. Constitution

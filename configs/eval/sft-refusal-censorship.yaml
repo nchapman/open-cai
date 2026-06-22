@@ -1,0 +1,68 @@
+output_dir: outputs/eval/sft-refusal-censorship
+
+models:
+  - label: heretic-base
+    name: tvall43/Qwen3.5-4B-heretic
+    chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
+    init_kwargs:
+      dtype: bfloat16
+      attn_implementation: sdpa
+      device_map: auto
+
+  - label: qwen-original
+    name: Qwen/Qwen3.5-4B
+    init_kwargs:
+      dtype: bfloat16
+      attn_implementation: sdpa
+      device_map: auto
+
+  - label: balanced-sft
+    name: tvall43/Qwen3.5-4B-heretic
+    adapter_path: outputs/sft/balanced
+    chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
+    init_kwargs:
+      dtype: bfloat16
+      attn_implementation: sdpa
+      device_map: auto
+
+  - label: protective-sft
+    name: tvall43/Qwen3.5-4B-heretic
+    adapter_path: outputs/sft/protective
+    chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
+    init_kwargs:
+      dtype: bfloat16
+      attn_implementation: sdpa
+      device_map: auto
+
+  - label: permissive-sft
+    name: tvall43/Qwen3.5-4B-heretic
+    adapter_path: outputs/sft/permissive
+    chat_template_path: configs/training/chat_templates/qwen3-heretic-sft.jinja
+    init_kwargs:
+      dtype: bfloat16
+      attn_implementation: sdpa
+      device_map: auto
+
+refusals:
+  dataset: mlabonne/harmful_behaviors
+  split: test[:100]
+  column: text
+  generation:
+    max_new_tokens: 160
+    batch_size: 10
+    temperature: 0.0
+    do_sample: false
+    strip_thinking: true
+
+censorship:
+  dataset: promptfoo/CCP-sensitive-prompts
+  split: train[:200]
+  column: prompt
+  metadata_columns:
+    - subject
+  generation:
+    max_new_tokens: 160
+    batch_size: 40
+    temperature: 0.0
+    do_sample: false
+    strip_thinking: true

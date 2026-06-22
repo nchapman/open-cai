@@ -1,4 +1,5 @@
 .venv/
+.venv-ngc/
 .env
 __pycache__/
 *.py[cod]
@@ -7,3 +8,5 @@ __pycache__/
 data/generated/
 data/training/
 outputs/
+logs/
+pod-state/

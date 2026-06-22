@@ -136,6 +136,12 @@ def run_suite_from_config(
         artifacts["capability"] = run_capability_eval(models, _mapping_config(config["capability"], "capability"), resolved_output_dir)
     if "refusals" in sections:
         artifacts["refusals"] = run_refusal_eval(models, _mapping_config(config["refusals"], "refusals"), resolved_output_dir)
+    if "censorship" in sections:
+        artifacts["censorship"] = run_censorship_eval(
+            models,
+            _mapping_config(config["censorship"], "censorship"),
+            resolved_output_dir,
+        )
     if "drift" in sections:
         artifacts["drift"] = run_drift_eval(models, _mapping_config(config["drift"], "drift"), resolved_output_dir)
     if "constitution" in sections:
@@ -154,7 +160,7 @@ def run_suite_from_config(
 
 
 def enabled_suite_sections(config: Mapping[str, object]) -> list[str]:
-    return [name for name in ["capability", "refusals", "drift", "constitution"] if config.get(name) is not None]
+    return [name for name in ["capability", "refusals", "censorship", "drift", "constitution"] if config.get(name) is not None]
 
 
 def validate_suite_config(config: Mapping[str, object]) -> None:
@@ -169,6 +175,8 @@ def validate_suite_config(config: Mapping[str, object]) -> None:
         parse_capability_config(_mapping_config(config["capability"], "capability"))
     if "refusals" in sections:
         parse_refusal_config(_mapping_config(config["refusals"], "refusals"))
+    if "censorship" in sections:
+        parse_censorship_config(_mapping_config(config["censorship"], "censorship"))
     if "drift" in sections:
         parse_prompt_dataset_config(_mapping_config(config["drift"], "drift"))
     if "constitution" in sections:
@@ -200,11 +208,19 @@ def parse_capability_config(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def parse_refusal_config(config: Mapping[str, object]) -> dict[str, object]:
+    return parse_marker_eval_config(config, "refusals")
+
+
+def parse_censorship_config(config: Mapping[str, object]) -> dict[str, object]:
+    return parse_marker_eval_config(config, "censorship")
+
+
+def parse_marker_eval_config(config: Mapping[str, object], label: str) -> dict[str, object]:
     parsed = parse_prompt_dataset_config(config)
     markers = config.get("markers", DEFAULT_REFUSAL_MARKERS)
     if not isinstance(markers, list) or not markers:
-        raise EvaluationError("refusals.markers must be a non-empty list")
-    parsed["markers"] = [_string_config(marker, "refusals.markers") for marker in markers]
+        raise EvaluationError(f"{label}.markers must be a non-empty list")
+    parsed["markers"] = [_string_config(marker, f"{label}.markers") for marker in markers]
     parsed["generation"] = parse_generation_config(config.get("generation", {"max_new_tokens": 128, "temperature": 0.0}))
     return parsed
 
@@ -213,7 +229,15 @@ def parse_prompt_dataset_config(config: Mapping[str, object]) -> dict[str, objec
     dataset = _string_config(config.get("dataset"), "dataset")
     split = _string_config(config.get("split", "test[:50]"), "split")
     column = _string_config(config.get("column", "text"), "column")
-    return {"dataset": dataset, "split": split, "column": column}
+    metadata_columns = config.get("metadata_columns", [])
+    if not isinstance(metadata_columns, list):
+        raise EvaluationError("metadata_columns must be a list")
+    return {
+        "dataset": dataset,
+        "split": split,
+        "column": column,
+        "metadata_columns": [_string_config(column_name, "metadata_columns") for column_name in metadata_columns],
+    }
 
 
 def parse_constitution_config(config: Mapping[str, object]) -> dict[str, object]:
@@ -364,7 +388,38 @@ def run_refusal_eval(
     config: Mapping[str, object],
     output_dir: Path,
 ) -> dict[str, object]:
-    parsed = parse_refusal_config(config)
+    return run_marker_eval(
+        models=models,
+        config=config,
+        output_dir=output_dir,
+        config_label="refusals",
+        artifact_name="refusals",
+    )
+
+
+def run_censorship_eval(
+    models: Sequence[Mapping[str, object]],
+    config: Mapping[str, object],
+    output_dir: Path,
+) -> dict[str, object]:
+    return run_marker_eval(
+        models=models,
+        config=config,
+        output_dir=output_dir,
+        config_label="censorship",
+        artifact_name="censorship",
+    )
+
+
+def run_marker_eval(
+    *,
+    models: Sequence[Mapping[str, object]],
+    config: Mapping[str, object],
+    output_dir: Path,
+    config_label: str,
+    artifact_name: str,
+) -> dict[str, object]:
+    parsed = parse_marker_eval_config(config, config_label)
     prompts = load_text_prompts(parsed)
     generation = parsed["generation"]
     markers = parsed["markers"]
@@ -373,7 +428,7 @@ def run_refusal_eval(
     try:
         import torch
     except ImportError as exc:
-        raise EvaluationError("refusal eval requires `uv sync --extra eval`") from exc
+        raise EvaluationError(f"{config_label} eval requires `uv sync --extra eval`") from exc
 
     def evaluate_model(model_spec: Mapping[str, object], tokenizer: object, model: object) -> None:
         model.eval()
@@ -392,6 +447,7 @@ def run_refusal_eval(
                     "response": response,
                     "raw_response": raw_response,
                     "refusal": refusal,
+                    "metadata": prompt.get("metadata", {}),
                 }
             )
         summary_rows.append(
@@ -404,8 +460,8 @@ def run_refusal_eval(
         )
 
     for_loaded_eval_model(models, torch, evaluate_model)
-    details_path = output_dir / "refusals.jsonl"
-    summary_path = output_dir / "refusals_summary.json"
+    details_path = output_dir / f"{artifact_name}.jsonl"
+    summary_path = output_dir / f"{artifact_name}_summary.json"
     write_jsonl(details_path, rows)
     write_json(summary_path, {"models": summary_rows})
     return {"path": str(details_path), "summary_path": str(summary_path), "models": summary_rows}
@@ -724,7 +780,7 @@ def first_token_logprobs(
     return torch_module.cat(logprobs, dim=0)
 
 
-def load_text_prompts(config: Mapping[str, object]) -> list[dict[str, str]]:
+def load_text_prompts(config: Mapping[str, object]) -> list[dict[str, object]]:
     try:
         from datasets import load_dataset
     except ImportError as exc:
@@ -733,6 +789,9 @@ def load_text_prompts(config: Mapping[str, object]) -> list[dict[str, str]]:
     dataset_id = _string_config(config.get("dataset"), "dataset")
     split = _string_config(config.get("split"), "split")
     column = _string_config(config.get("column"), "column")
+    metadata_columns = config.get("metadata_columns", [])
+    if not isinstance(metadata_columns, list):
+        raise EvaluationError("metadata_columns must be a list")
     try:
         dataset = load_dataset(dataset_id, split=split)
     except Exception as exc:  # noqa: BLE001 - surface dataset/cache/auth failures as CLI errors.
@@ -743,7 +802,12 @@ def load_text_prompts(config: Mapping[str, object]) -> list[dict[str, str]]:
             continue
         value = row.get(column)
         if isinstance(value, str) and value.strip():
-            prompts.append({"id": str(index), "text": value.strip()})
+            metadata = {
+                column_name: row[column_name]
+                for column_name in metadata_columns
+                if isinstance(column_name, str) and column_name in row
+            }
+            prompts.append({"id": str(index), "text": value.strip(), "metadata": metadata})
     if not prompts:
         raise EvaluationError(f"dataset {dataset_id}:{split} produced no prompts from column {column!r}")
     return prompts
@@ -928,6 +992,13 @@ def render_suite_summary(artifacts: Mapping[str, object], *, models: Sequence[Ma
             if isinstance(row, Mapping):
                 lines.append(f"| {row['model_label']} | {row['refusals']} | {row['total']} | {float(row['refusal_rate']):.2%} |")
         lines.append("")
+    censorship = artifacts.get("censorship")
+    if isinstance(censorship, Mapping):
+        lines.extend(["## Censorship", "", "| Model | Refusals | Total | Rate |", "|---|---:|---:|---:|"])
+        for row in censorship.get("models", []):  # type: ignore[union-attr]
+            if isinstance(row, Mapping):
+                lines.append(f"| {row['model_label']} | {row['refusals']} | {row['total']} | {float(row['refusal_rate']):.2%} |")
+        lines.extend(["", f"Raw results: `{censorship['path']}`", ""])
     drift = artifacts.get("drift")
     if isinstance(drift, Mapping):
         lines.extend(["## Drift", "", "| Model | Reference | KL Divergence |", "|---|---|---:|"])
@@ -944,7 +1015,7 @@ def render_suite_summary(artifacts: Mapping[str, object], *, models: Sequence[Ma
                 score_text = f"{float(score):.2f}" if isinstance(score, (int, float)) else ""
                 lines.append(f"| {row['model_label']} | {score_text} | {row['judgments']} |")
         lines.append("")
-    if not any(name in artifacts for name in ["capability", "refusals", "drift", "constitution"]):
+    if not any(name in artifacts for name in ["capability", "refusals", "censorship", "drift", "constitution"]):
         lines.append(f"Models: {', '.join(labels)}")
     return "\n".join(lines).rstrip() + "\n"
 

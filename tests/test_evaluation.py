@@ -10,6 +10,7 @@ from cai.evaluation import (
     judge_constitution_response,
     judge_constitution_responses,
     parse_capability_config,
+    parse_censorship_config,
     parse_generation_config,
     parse_model_specs,
     parse_prompt_specs,
@@ -77,6 +78,23 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(summary["models"], 1)
         self.assertEqual(summary["sections"], ["refusals", "drift"])
         self.assertTrue(summary["dry_run"])
+
+    def test_suite_dry_run_validates_censorship_section(self) -> None:
+        summary = run_suite_from_config(
+            {
+                "output_dir": "outputs/eval/china-censorship",
+                "models": [{"label": "base", "name": "model"}],
+                "censorship": {
+                    "dataset": "promptfoo/CCP-sensitive-prompts",
+                    "split": "train[:2]",
+                    "column": "prompt",
+                    "metadata_columns": ["subject"],
+                },
+            },
+            dry_run=True,
+        )
+
+        self.assertEqual(summary["sections"], ["censorship"])
 
     def test_parse_prompt_specs_accepts_messages_or_prompt(self) -> None:
         prompts = parse_prompt_specs(
@@ -151,6 +169,20 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(parsed["dataset"], "bad")
         self.assertIn("i cannot", parsed["markers"])
 
+    def test_parse_censorship_config_preserves_metadata_columns(self) -> None:
+        parsed = parse_censorship_config(
+            {
+                "dataset": "promptfoo/CCP-sensitive-prompts",
+                "split": "train[:2]",
+                "column": "prompt",
+                "metadata_columns": ["subject"],
+            }
+        )
+
+        self.assertEqual(parsed["column"], "prompt")
+        self.assertEqual(parsed["metadata_columns"], ["subject"])
+        self.assertIn("i cannot", parsed["markers"])
+
     def test_is_refusal_matches_heretic_style_markers(self) -> None:
         self.assertTrue(is_refusal("I'm sorry, I cannot help with that.", ["sorry", "i cannot"]))
         self.assertTrue(is_refusal("", ["sorry"]))
@@ -185,6 +217,10 @@ class EvaluationTests(unittest.TestCase):
                     "metrics": [{"model_label": "base", "task": "hellaswag", "metric": "acc_norm,none", "value": 0.5}],
                 },
                 "refusals": {"models": [{"model_label": "base", "refusals": 1, "total": 2, "refusal_rate": 0.5}]},
+                "censorship": {
+                    "path": "censorship.jsonl",
+                    "models": [{"model_label": "base", "refusals": 2, "total": 4, "refusal_rate": 0.5}],
+                },
                 "drift": {"models": [{"model_label": "base", "reference_model": "base", "kl_divergence": 0.0}]},
                 "constitution": {"models": [{"model_label": "base", "average_score": 4.0, "judgments": 2}]},
             },
@@ -194,6 +230,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("## Capability", report)
         self.assertIn("acc_norm,none", report)
         self.assertIn("50.00%", report)
+        self.assertIn("## Censorship", report)
+        self.assertIn("censorship.jsonl", report)
         self.assertIn("0.000000", report)
         self.assertIn("4.00", report)
 
